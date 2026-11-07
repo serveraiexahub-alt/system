@@ -484,15 +484,6 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     var d = Math.floor(h / 24); if (d < 30) return d + ' วันที่แล้ว';
     return fmt(ts);
   }
-  function toast(txt) {
-    var old = document.querySelector('.toast'); if (old) old.remove();
-    var t = document.createElement('div'); t.className = 'toast';
-    var inp = document.createElement('input'); inp.readOnly = true; inp.value = txt;
-    var b = document.createElement('button'); b.className = 'copy'; b.textContent = 'COPY';
-    b.onclick = function () { copyText(txt); b.textContent = 'OK'; setTimeout(function () { b.textContent = 'COPY'; }, 1500); };
-    t.appendChild(inp); t.appendChild(b); document.body.appendChild(t);
-    setTimeout(function () { if (t.parentNode) t.remove(); }, 9000);
-  }
   var state = { user: null, files: [], invites: [] };
   function brand() { return '<div class="brand"><div class="logo"><img src="https://files.catbox.moe/okwlyx.png" alt=""></div><h1>สกัด HUB</h1></div>'; }
   function renderAuth(mode) {
@@ -552,7 +543,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     Array.prototype.forEach.call(nodes, function (node) {
       var id = node.getAttribute('data-id'), f = null;
       for (var k = 0; k < state.files.length; k++) if (state.files[k].id === id) f = state.files[k];
-      node.querySelector('.cp').onclick = function () { var v = node.querySelector('.raw input').value; copyText(v); toast(v); };
+      node.querySelector('.cp').onclick = function () { var v = node.querySelector('.raw input').value; copyText(v); };
       node.querySelector('.ed').onclick = function () { openModal(id); };
       if (node.querySelector('.rm')) node.querySelector('.rm').onclick = function () {
         if (!confirm('Delete this file? The raw link will stop working.')) return;
@@ -569,13 +560,18 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<div class="body">' +
       '<div class="field"><label>' + ICON.file + ' ชื่อไฟล์</label><input class="input" id="fname" placeholder="myscript" spellcheck="false"></div>' +
       '<div class="field"><label>' + ICON.code + ' โค้ด</label><textarea class="input" id="fcode" placeholder="print(&quot;hello&quot;)"></textarea></div>' +
-      '<div class="field"><label>' + ICON.file + ' อัปโหลดไฟล์</label><input class="input" type="file" id="ffile" accept=".lua,.txt,.js,.json,text/plain"></div>' +
+      '<div class="field"><label>' + ICON.file + ' อัปโหลดไฟล์</label>' +
+      '<button class="btn ghost uploadbtn" id="fpick" type="button">' + ICON.file + ' เลือกไฟล์</button>' +
+      '<input type="file" id="ffile" accept=".lua,.txt,.js,.json,text/plain" style="display:none">' +
+      '<div class="hint" id="ffname">ยังไม่ได้เลือกไฟล์</div></div>' +
       '<div class="hint">ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย</div></div>' +
       '<div class="foot"><button class="btn ghost" id="cancel">ยกเลิก</button><button class="btn" id="save">' + (editing ? 'บันทึก' : 'สร้าง') + '</button></div></div>';
     document.body.appendChild(overlay);
     var nameEl = overlay.querySelector('#fname'), codeEl = overlay.querySelector('#fcode');
+    overlay.querySelector('#fpick').onclick = function () { overlay.querySelector('#ffile').click(); };
     overlay.querySelector('#ffile').addEventListener('change', function (e) {
       var file = e.target.files[0]; if (!file) return;
+      overlay.querySelector('#ffname').textContent = file.name;
       var reader = new FileReader();
       reader.onload = function () { codeEl.value = String(reader.result || ''); if (!nameEl.value.trim()) nameEl.value = file.name.replace(/\.[^.]+$/, ''); };
       reader.readAsText(file);
@@ -585,7 +581,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     overlay.querySelector('#cancel').onclick = function () { overlay.remove(); };
     overlay.querySelector('#save').onclick = function () {
       api(editing ? '/api/files/' + id : '/api/files', { method: editing ? 'PUT' : 'POST', body: { name: nameEl.value.trim(), code: codeEl.value } })
-        .then(function (d) { overlay.remove(); loadFiles(); toast(loader(d.rawUrl)); })
+        .then(function (d) { overlay.remove(); loadFiles(); })
         .catch(function (e) { alert(e.message); });
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
