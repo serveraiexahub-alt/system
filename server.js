@@ -189,6 +189,14 @@ app.delete('/api/files/:id', auth, function (req, res) {
 app.get('/raw/:id', function (req, res) {
   const f = db.files[req.params.id];
   if (!f) return res.status(404).send('Not found');
+  const accept = String(req.headers.accept || '').toLowerCase();
+  const ua = String(req.headers['user-agent'] || '').toLowerCase();
+  const isBrowser = accept.includes('text/html') && !ua.includes('roblox') && !ua.includes('httpget') && !ua.includes('wininet') && req.query.raw !== '1';
+  if (isBrowser) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(LOCK_PAGE);
+  }
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -201,6 +209,36 @@ app.get('/', function (req, res) {
   res.send(HTML);
 });
 
+const LOCK_PAGE = `<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>Access Denied</title>
+<link rel="icon" type="image/png" href="https://files.catbox.moe/okwlyx.png">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #000; color: #fff; min-height: 100vh;
+  display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.box { max-width: 520px; }
+.box img { width: 76px; height: 76px; border-radius: 18px; border: 1px solid #333; margin-bottom: 28px; }
+h1 { font-size: 22px; line-height: 1.8; letter-spacing: 1px; font-weight: 700; }
+p { margin-top: 18px; color: #8a8a8a; font-size: 12px; letter-spacing: 1px; }
+</style>
+</head>
+<body>
+<div class="box">
+<img src="https://files.catbox.moe/okwlyx.png" alt="">
+<h1>ที่นี้ไม่ต้อนรับคุณเชิญออก🚪</h1>
+<p>This resource is only accessible by script</p>
+</div>
+</body>
+</html>`;
+
 const HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -208,7 +246,7 @@ const HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#000000">
 <title>SYSTEM</title>
-<link rel="icon" type="image/jpeg" href="https://files.catbox.moe/ob5kt0.jpg">
+<link rel="icon" type="image/png" href="https://files.catbox.moe/okwlyx.png">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
@@ -245,6 +283,7 @@ button { font-family: inherit; cursor: pointer; }
 .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
 .brand .logo { width: 34px; height: 34px; border: 1px solid var(--fg); border-radius: 8px; display: flex; align-items: center; justify-content: center; }
 .brand .logo .i { width: 18px; height: 18px; }
+.brand .logo img { width: 100%; height: 100%; object-fit: cover; border-radius: 8px; }
 .brand h1 { font-size: 18px; font-weight: 700; letter-spacing: 2px; }
 .sub { color: var(--muted); font-size: 12px; margin-bottom: 24px; }
 .field { margin-bottom: 14px; }
@@ -367,6 +406,7 @@ textarea.input { min-height: 260px; resize: vertical; font-size: 12px; line-heig
     try { document.execCommand('copy'); } catch (e) {}
     document.body.removeChild(ta);
   }
+  function loader(u) { return 'loadstring(game:HttpGet("' + u + '"))()'; }
   function toast(rawUrl) {
     var old = document.querySelector('.toast'); if (old) old.remove();
     var t = document.createElement('div'); t.className = 'toast';
@@ -380,7 +420,7 @@ textarea.input { min-height: 260px; resize: vertical; font-size: 12px; line-heig
   var state = { user: null, files: [] };
 
   function brand() {
-    return '<div class="brand"><div class="logo">' + ICON.code + '</div><h1>SYSTEM</h1></div>';
+    return '<div class="brand"><div class="logo"><img src="https://files.catbox.moe/okwlyx.png" alt=""></div><h1>SYSTEM</h1></div>';
   }
 
   function renderAuth(mode) {
@@ -456,6 +496,9 @@ textarea.input { min-height: 260px; resize: vertical; font-size: 12px; line-heig
         '<div class="raw"><span class="lbl">' + ICON.link + ' RAW</span>' +
         '<input readonly value="' + esc(f.rawUrl) + '">' +
         '<button class="iconbtn cp" title="Copy link">' + ICON.copy + '</button></div>' +
+        '<div class="raw"><span class="lbl">' + ICON.code + ' LOADER</span>' +
+        '<input readonly value="' + esc(loader(f.rawUrl)) + '">' +
+        '<button class="iconbtn cp2" title="Copy loader">' + ICON.copy + '</button></div>' +
         '<div class="actions">' +
         '<button class="iconbtn ed" title="Edit">' + ICON.edit + '</button>' +
         '<button class="iconbtn rm" title="Delete">' + ICON.trash + '</button>' +
@@ -466,6 +509,9 @@ textarea.input { min-height: 260px; resize: vertical; font-size: 12px; line-heig
       var id = node.getAttribute('data-id');
       node.querySelector('.cp').onclick = function () {
         var inp = node.querySelector('.raw input'); copyText(inp.value); toast(inp.value);
+      };
+      node.querySelector('.cp2').onclick = function () {
+        var inp = node.querySelectorAll('.raw input')[1]; copyText(inp.value); toast(inp.value);
       };
       node.querySelector('.ed').onclick = function () { openModal(id); };
       node.querySelector('.rm').onclick = function () {
@@ -483,6 +529,7 @@ textarea.input { min-height: 260px; resize: vertical; font-size: 12px; line-heig
       '<div class="body">' +
       '<div class="field"><label>' + ICON.file + ' File name</label><input class="input" id="fname" placeholder="myscript" spellcheck="false"></div>' +
       '<div class="field"><label>' + ICON.code + ' Code</label><textarea class="input" id="fcode" placeholder="print(&quot;hello&quot;)"></textarea></div>' +
+      '<div class="field"><label>' + ICON.file + ' Upload file</label><input class="input" type="file" id="ffile" accept=".lua,.txt,.js,.json,text/plain"></div>' +
       '<div class="hint">The raw link stays the same after you edit. Paste it into your executor.</div>' +
       '</div>' +
       '<div class="foot"><button class="btn ghost" id="cancel">Cancel</button><button class="btn" id="save">' + (editing ? 'Save changes' : 'Create') + '</button></div>' +
@@ -490,6 +537,16 @@ textarea.input { min-height: 260px; resize: vertical; font-size: 12px; line-heig
     document.body.appendChild(overlay);
     var nameEl = overlay.querySelector('#fname');
     var codeEl = overlay.querySelector('#fcode');
+    overlay.querySelector('#ffile').addEventListener('change', function (e) {
+      var file = e.target.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        codeEl.value = String(reader.result || '');
+        if (!nameEl.value.trim()) nameEl.value = file.name.replace(/\.[^.]+$/, '');
+      };
+      reader.readAsText(file);
+    });
     if (editing) {
       api('/api/files/' + id).then(function (d) { nameEl.value = d.name; codeEl.value = d.code; }).catch(function (e) { alert(e.message); overlay.remove(); });
     } else { nameEl.focus(); }
@@ -502,7 +559,7 @@ textarea.input { min-height: 260px; resize: vertical; font-size: 12px; line-heig
       api(path, { method: method, body: { name: name, code: code } }).then(function (d) {
         overlay.remove();
         loadFiles();
-        toast(d.rawUrl);
+        toast(loader(d.rawUrl));
       }).catch(function (e) { alert(e.message); });
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
