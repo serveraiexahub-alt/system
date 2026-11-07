@@ -25,7 +25,19 @@ function loadSecret() {
 }
 const SECRET = process.env.SECRET || loadSecret();
 
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '3mb' }));
+app.use(function (req, res, next) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  if (String(req.headers['x-forwarded-proto'] || req.protocol) === 'https') res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  next();
+});
 
 let db = load();
 function load() {
@@ -44,9 +56,14 @@ function ensureDb() {
   db.folders = db.folders || {};
   db.follows = db.follows || {};
   db.favorites = db.favorites || {};
+  db.supports = db.supports || [];
+  db.signupLog = db.signupLog || [];
+  db.ipReg = db.ipReg || {};
+  db.fpReg = db.fpReg || {};
   Object.values(db.users).forEach(function (u) {
     if (typeof u.nick !== 'string') u.nick = '';
     if (typeof u.avatar !== 'string') u.avatar = '';
+    if (typeof u.created !== 'number') u.created = Date.now();
   });
   Object.values(db.files).forEach(function (f) {
     if (f.visibility !== 'private') f.visibility = 'public';
@@ -78,6 +95,18 @@ function verify(pw, stored) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function id(n) { return crypto.randomBytes(n || 8).toString('base64url'); }
+
+const BAD_KEYS = { '__proto__': 1, 'constructor': 1, 'prototype': 1, 'toString': 1, 'valueOf': 1, 'hasOwnProperty': 1 };
+function ownGet(map, key) {
+  if (!map || typeof key !== 'string' || !key) return undefined;
+  if (BAD_KEYS[key]) return undefined;
+  return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
+}
+function badKey(req, res, next) {
+  const bad = Object.keys(req.params || {}).some(function (k) { return BAD_KEYS[req.params[k]]; });
+  if (bad) return res.status(400).json({ error: 'Invalid id' });
+  next();
+}
 
 function sign(payload) {
   const d = Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -113,7 +142,7 @@ function parseCookies(req) {
 function userFromReq(req) {
   const p = unsign(parseCookies(req).token);
   if (!p || !p.uid) return null;
-  const u = db.users[p.uid];
+  const u = ownGet(db.users, p.uid);
   return u ? { id: u.id, username: u.username, nick: u.nick || '', avatar: u.avatar || '' } : null;
 }
 
@@ -138,6 +167,46 @@ function limiter(req, res, next) {
   if (hits[ip].length >= max) return res.status(429).json({ error: 'Too many attempts, try again later' });
   hits[ip].push(now);
   next();
+}
+
+const SUPPORT_PHONE = process.env.SUPPORT_PHONE || '0809647719';
+const SIGNUP_IP_MAX = Math.max(1, Number(process.env.SIGNUP_IP_MAX) || 5);
+const SIGNUP_FP_MAX = Math.max(1, Number(process.env.SIGNUP_FP_MAX) || 3);
+const SIGNUP_WINDOW_H = Math.max(1, Number(process.env.SIGNUP_WINDOW_H) || 24);
+
+function clientIp(req) {
+  return String((req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '?').replace(/^::ffff:/, '');
+}
+function ipKey(ip) { return crypto.createHmac('sha256', SECRET).update(ip).digest('hex').slice(0, 32); }
+function fpFromReq(req) {
+  const raw = req.headers['x-client-fp'] || '';
+  return raw ? crypto.createHmac('sha256', SECRET).update(String(raw)).digest('hex').slice(0, 32) : '';
+}
+function recentSignups(req) {
+  const now = Date.now();
+  const ip = clientIp(req);
+  const fp = fpFromReq(req);
+  const dayAgo = now - SIGNUP_WINDOW_H * 3600 * 1000;
+  const fromIp = (db.signupLog || []).filter(function (r) { return r.ip === ip && r.ts > dayAgo; }).length;
+  const fromFp = fp ? (db.signupLog || []).filter(function (r) { return r.fp === fp && r.ts > dayAgo; }).length : 0;
+  return { ip: ip, fp: fp, fromIp: fromIp, fromFp: fromFp };
+}
+function recordSignup(req, uid) {
+  const info = recentSignups(req);
+  db.signupLog.push({ ip: info.ip, fp: info.fp, uid: uid, ts: Date.now() });
+  if (db.signupLog.length > 5000) db.signupLog = db.signupLog.slice(-5000);
+  db.ipReg[ipKey(info.ip)] = db.users[uid].created;
+  if (info.fp) db.fpReg[info.fp] = db.users[uid].created;
+}
+function supportAgg() {
+  const map = {};
+  (db.supports || []).forEach(function (s) {
+    if (!map[s.uid]) map[s.uid] = { uid: s.uid, total: 0, count: 0, last: 0 };
+    map[s.uid].total += Number(s.amount) || 0;
+    map[s.uid].count += 1;
+    if (s.ts > map[s.uid].last) map[s.uid].last = s.ts;
+  });
+  return Object.values(map).sort(function (a, b) { return b.total - a.total || b.count - a.count; });
 }
 
 function rawUrl(req, fid) {
@@ -175,7 +244,7 @@ function dispName(u) {
 function folderLastUpdated(fo) {
   let ts = fo.updated || fo.created || 0;
   (fo.files || []).forEach(function (fid) {
-    const f = db.files[fid];
+    const f = ownGet(db.files, fid);
     if (f && f.updated > ts) ts = f.updated;
   });
   return ts;
@@ -239,11 +308,15 @@ app.post('/api/signup', limiter, function (req, res) {
   if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'Username must be 3-20 characters (a-z, 0-9, _)' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
   for (const u of Object.values(db.users)) if (u.username === username) return res.status(409).json({ error: 'Username already taken' });
+  const info = recentSignups(req);
+  if (info.fromIp >= SIGNUP_IP_MAX) return res.status(429).json({ error: 'This network already created too many accounts today. Try again tomorrow.' });
+  if (info.fp && info.fromFp >= SIGNUP_FP_MAX) return res.status(429).json({ error: 'This device already created too many accounts today. Try again tomorrow.' });
   const uid = id(10);
   db.users[uid] = { id: uid, username: username, hash: hash(password), created: Date.now() };
+  recordSignup(req, uid);
   save();
   setSession(res, uid);
-  res.status(201).json({ ok: true, user: { id: uid, username: username } });
+  res.status(201).json({ ok: true, user: { id: uid, username: username, nick: '', avatar: '' } });
 });
 
 app.post('/api/login', limiter, function (req, res) {
@@ -253,7 +326,7 @@ app.post('/api/login', limiter, function (req, res) {
   for (const u of Object.values(db.users)) if (u.username === username) found = u;
   if (!found || !verify(password, found.hash)) return res.status(401).json({ error: 'Invalid username or password' });
   setSession(res, found.id);
-  res.json({ ok: true, user: { id: found.id, username: found.username } });
+  res.json({ ok: true, user: { id: found.id, username: found.username, nick: found.nick || '', avatar: found.avatar || '' } });
 });
 
 app.post('/api/logout', function (req, res) {
@@ -266,7 +339,7 @@ app.get('/api/me', function (req, res) {
 });
 
 app.put('/api/profile', auth, function (req, res) {
-  const u = db.users[req.user.id];
+  const u = ownGet(db.users, req.user.id);
   if (!u) return res.status(404).json({ error: 'User not found' });
   const body = req.body || {};
   if (body.nick !== undefined) {
@@ -284,12 +357,57 @@ app.put('/api/profile', auth, function (req, res) {
   res.json({ ok: true, user: { id: u.id, username: u.username, nick: u.nick || '', avatar: u.avatar || '' } });
 });
 
+app.get('/api/support', auth, function (req, res) {
+  const u = req.user;
+  const mine = (db.supports || []).filter(function (s) { return s.uid === u.id; });
+  const total = mine.reduce(function (a, s) { return a + (Number(s.amount) || 0); }, 0);
+  const board = supportAgg().slice(0, 10).map(function (row, i) {
+    const person = ownGet(db.users, row.uid) || {};
+    return {
+      rank: i + 1,
+      uid: row.uid,
+      username: person.username || '?',
+      nick: person.nick || '',
+      avatar: person.avatar || '',
+      total: row.total,
+      count: row.count
+    };
+  });
+  const myRank = supportAgg().findIndex(function (r) { return r.uid === u.id; });
+  res.json({
+    phone: SUPPORT_PHONE,
+    link: String(process.env.SUPPORT_LINK || ''),
+    myTotal: total,
+    myCount: mine.length,
+    myRank: myRank >= 0 ? myRank + 1 : 0,
+    board: board
+  });
+});
+
+app.post('/api/support', limiter, auth, function (req, res) {
+  const u = req.user;
+  const amount = Number((req.body || {}).amount);
+  const slip = String((req.body || {}).slip || '').trim();
+  if (!isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'Amount must be greater than 0' });
+  if (amount > 1000000) return res.status(400).json({ error: 'Amount too large' });
+  if (slip.length > 400) return res.status(400).json({ error: 'Reference too long' });
+  db.supports = db.supports || [];
+  db.supports.push({ id: id(8), uid: u.id, amount: Math.round(amount * 100) / 100, slip: slip, ts: Date.now() });
+  if (db.supports.length > 20000) db.supports = db.supports.slice(-20000);
+  save();
+  const board = supportAgg().slice(0, 10).map(function (row, i) {
+    const person = ownGet(db.users, row.uid) || {};
+    return { rank: i + 1, uid: row.uid, username: person.username || '?', nick: person.nick || '', avatar: person.avatar || '', total: row.total, count: row.count };
+  });
+  res.status(201).json({ ok: true, phone: SUPPORT_PHONE, board: board });
+});
+
 app.get('/api/files', auth, function (req, res) {
   const u = req.user;
   const list = Object.values(db.files)
     .filter(function (f) { return f.owner === u.id || (f.shares || []).indexOf(u.id) >= 0; })
     .map(function (f) {
-      const owner = db.users[f.owner];
+      const owner = ownGet(db.users, f.owner);
       return {
         id: f.id, name: f.name, created: f.created, updated: f.updated,
         rawUrl: rawUrl(req, f.id),
@@ -312,7 +430,7 @@ app.post('/api/files', auth, function (req, res) {
   if (code.length > MAX_CODE) return res.status(400).json({ error: 'Code exceeds 2 MB limit' });
   const fid = id(8);
   const now = Date.now();
-  const folder = req.body.folder && db.folders[String(req.body.folder)] ? String(req.body.folder) : null;
+  const folder = req.body.folder && ownGet(db.folders, String(req.body.folder)) ? String(req.body.folder) : null;
   const vis = req.body.visibility === 'private' ? 'private' : 'public';
   const f = { id: fid, owner: req.user.id, name: name, code: code, created: now, updated: now, shares: [], invites: [], history: [], folder: folder, visibility: vis };
   if (folder) {
@@ -326,14 +444,14 @@ app.post('/api/files', auth, function (req, res) {
   res.status(201).json({ id: fid, name: name, rawUrl: rawUrl(req, fid) });
 });
 
-app.get('/api/files/:id', auth, function (req, res) {
-  const f = db.files[req.params.id];
+app.get('/api/files/:id', auth, badKey, function (req, res) {
+  const f = ownGet(db.files, req.params.id);
   if (!f || !canView(f, req.user)) return res.status(404).json({ error: 'File not found' });
   res.json({ id: f.id, name: f.name, code: f.code, role: canDelete(f, req.user) ? 'owner' : 'editor', folder: f.folder || null, visibility: f.visibility || 'public', ownerName: dispName(db.users[f.owner]), fav: isFav(req.user, 'file', f.id) });
 });
 
-app.put('/api/files/:id', auth, function (req, res) {
-  const f = db.files[req.params.id];
+app.put('/api/files/:id', auth, badKey, function (req, res) {
+  const f = ownGet(db.files, req.params.id);
   if (!f || !canEdit(f, req.user)) return res.status(404).json({ error: 'File not found' });
   const body = req.body || {};
   const name = body.name !== undefined ? String(body.name).trim() : f.name;
@@ -348,7 +466,7 @@ app.put('/api/files/:id', auth, function (req, res) {
   if (canDelete(f, req.user)) {
     if (req.body.visibility === 'private' || req.body.visibility === 'public') f.visibility = req.body.visibility;
     if (req.body.folder !== undefined) {
-      const nf = req.body.folder && db.folders[String(req.body.folder)] ? String(req.body.folder) : null;
+      const nf = req.body.folder && ownGet(db.folders, String(req.body.folder)) ? String(req.body.folder) : null;
       Object.values(db.folders).forEach(function (fo) {
         const i = (fo.files || []).indexOf(f.id);
         if (i >= 0) fo.files.splice(i, 1);
@@ -366,8 +484,8 @@ app.put('/api/files/:id', auth, function (req, res) {
   res.json({ ok: true, id: f.id, rawUrl: rawUrl(req, f.id) });
 });
 
-app.delete('/api/files/:id', auth, function (req, res) {
-  const f = db.files[req.params.id];
+app.delete('/api/files/:id', auth, badKey, function (req, res) {
+  const f = ownGet(db.files, req.params.id);
   if (!f || !canDelete(f, req.user)) return res.status(404).json({ error: 'File not found' });
   delete db.files[f.id];
   removeFileEverywhere(f.id);
@@ -375,14 +493,14 @@ app.delete('/api/files/:id', auth, function (req, res) {
   res.json({ ok: true });
 });
 
-app.get('/api/files/:id/history', auth, function (req, res) {
-  const f = db.files[req.params.id];
+app.get('/api/files/:id/history', auth, badKey, function (req, res) {
+  const f = ownGet(db.files, req.params.id);
   if (!f || !canView(f, req.user)) return res.status(404).json({ error: 'File not found' });
   res.json({ history: f.history || [], name: f.name });
 });
 
-app.post('/api/files/:id/invite', auth, function (req, res) {
-  const f = db.files[req.params.id];
+app.post('/api/files/:id/invite', auth, badKey, function (req, res) {
+  const f = ownGet(db.files, req.params.id);
   if (!f || !canDelete(f, req.user)) return res.status(404).json({ error: 'File not found' });
   const username = String((req.body || {}).username || '').trim().toLowerCase();
   if (!username) return res.status(400).json({ error: 'Username is required' });
@@ -402,15 +520,15 @@ app.get('/api/invites', auth, function (req, res) {
   const out = [];
   Object.values(db.files).forEach(function (f) {
     if ((f.invites || []).indexOf(req.user.id) >= 0) {
-      const owner = db.users[f.owner];
+      const owner = ownGet(db.users, f.owner);
       out.push({ fileId: f.id, name: f.name, ownerName: dispName(owner) });
     }
   });
   res.json({ invites: out });
 });
 
-app.post('/api/invites/:fileId/accept', auth, function (req, res) {
-  const f = db.files[req.params.fileId];
+app.post('/api/invites/:fileId/accept', auth, badKey, function (req, res) {
+  const f = ownGet(db.files, req.params.fileId);
   if (!f) return res.status(404).json({ error: 'File not found' });
   const i = (f.invites || []).indexOf(req.user.id);
   if (i < 0) return res.status(404).json({ error: 'Invite not found' });
@@ -421,8 +539,8 @@ app.post('/api/invites/:fileId/accept', auth, function (req, res) {
   res.json({ ok: true });
 });
 
-app.post('/api/invites/:fileId/decline', auth, function (req, res) {
-  const f = db.files[req.params.fileId];
+app.post('/api/invites/:fileId/decline', auth, badKey, function (req, res) {
+  const f = ownGet(db.files, req.params.fileId);
   if (!f) return res.status(404).json({ error: 'File not found' });
   const i = (f.invites || []).indexOf(req.user.id);
   if (i >= 0) { f.invites.splice(i, 1); save(); }
@@ -434,15 +552,15 @@ const MAX_FOLDER = 64;
 function folderView(fo, req, u) {
   const owner = db.users[fo.owner];
   const ids = (fo.files || []).filter(function (fid) {
-    const f = db.files[fid];
+    const f = ownGet(db.files, fid);
     return f && canView(f, u);
   });
   const files = ids.map(function (fid) {
-    const f = db.files[fid];
+    const f = ownGet(db.files, fid);
     return { id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public', ownerName: dispName(db.users[f.owner]), rawUrl: rawUrl(req, f.id), fav: isFav(u, 'file', f.id) };
   }).sort(function (a, b) { return b.updated - a.updated; });
   let last = fo.updated || fo.created || 0;
-  ids.forEach(function (fid) { if (db.files[fid].updated > last) last = db.files[fid].updated; });
+  ids.forEach(function (fid) { if (ownGet(db.files, fid).updated > last) last = ownGet(db.files, fid).updated; });
   return {
     id: fo.id, name: fo.name, created: fo.created, updated: last,
     visibility: fo.visibility || 'public',
@@ -476,7 +594,7 @@ app.post('/api/folders', auth, function (req, res) {
   };
   if (Array.isArray(req.body.files)) {
     req.body.files.forEach(function (fid) {
-      const f = db.files[String(fid)];
+      const f = ownGet(db.files, String(fid));
       if (f && f.owner === req.user.id && fo.files.indexOf(f.id) < 0) { fo.files.push(f.id); f.folder = fo.id; }
     });
   }
@@ -485,14 +603,14 @@ app.post('/api/folders', auth, function (req, res) {
   res.status(201).json({ ok: true, id: fo.id, folder: folderView(fo, req, req.user) });
 });
 
-app.get('/api/folders/:id', auth, function (req, res) {
-  const fo = db.folders[req.params.id];
+app.get('/api/folders/:id', auth, badKey, function (req, res) {
+  const fo = ownGet(db.folders, req.params.id);
   if (!fo || !canViewFolder(fo, req.user)) return res.status(404).json({ error: 'Folder not found' });
   res.json({ folder: folderView(fo, req, req.user) });
 });
 
-app.put('/api/folders/:id', auth, function (req, res) {
-  const fo = db.folders[req.params.id];
+app.put('/api/folders/:id', auth, badKey, function (req, res) {
+  const fo = ownGet(db.folders, req.params.id);
   if (!fo || !canDelete(fo, req.user)) return res.status(404).json({ error: 'Folder not found' });
   if (req.body.name !== undefined) {
     const name = String(req.body.name).trim();
@@ -503,21 +621,21 @@ app.put('/api/folders/:id', auth, function (req, res) {
   if (req.body.visibility === 'private' || req.body.visibility === 'public') fo.visibility = req.body.visibility;
   if (Array.isArray(req.body.add)) {
     req.body.add.forEach(function (fid) {
-      const f = db.files[String(fid)];
+      const f = ownGet(db.files, String(fid));
       if (f && f.owner === req.user.id && fo.files.indexOf(f.id) < 0) { fo.files.push(f.id); f.folder = fo.id; }
     });
   }
   if (Array.isArray(req.body.remove)) {
     req.body.remove.forEach(function (fid) {
       const i = fo.files.indexOf(String(fid));
-      if (i >= 0) { fo.files.splice(i, 1); const f = db.files[String(fid)]; if (f && f.folder === fo.id) f.folder = null; }
+      if (i >= 0) { fo.files.splice(i, 1); const f = ownGet(db.files, String(fid)); if (f && f.folder === fo.id) f.folder = null; }
     });
   }
   if (Array.isArray(req.body.files)) {
-    fo.files.forEach(function (fid) { const f = db.files[fid]; if (f && f.folder === fo.id) f.folder = null; });
+    fo.files.forEach(function (fid) { const f = ownGet(db.files, fid); if (f && f.folder === fo.id) f.folder = null; });
     fo.files = [];
     req.body.files.forEach(function (fid) {
-      const f = db.files[String(fid)];
+      const f = ownGet(db.files, String(fid));
       if (f && f.owner === req.user.id && fo.files.indexOf(f.id) < 0) { fo.files.push(f.id); f.folder = fo.id; }
     });
   }
@@ -526,10 +644,10 @@ app.put('/api/folders/:id', auth, function (req, res) {
   res.json({ ok: true, folder: folderView(fo, req, req.user) });
 });
 
-app.delete('/api/folders/:id', auth, function (req, res) {
-  const fo = db.folders[req.params.id];
+app.delete('/api/folders/:id', auth, badKey, function (req, res) {
+  const fo = ownGet(db.folders, req.params.id);
   if (!fo || !canDelete(fo, req.user)) return res.status(404).json({ error: 'Folder not found' });
-  (fo.files || []).forEach(function (fid) { const f = db.files[fid]; if (f && f.folder === fo.id) f.folder = null; });
+  (fo.files || []).forEach(function (fid) { const f = ownGet(db.files, fid); if (f && f.folder === fo.id) f.folder = null; });
   delete db.folders[fo.id];
   Object.keys(db.favorites).forEach(function (k) {
     db.favorites[k] = db.favorites[k].filter(function (x) { return !(x.type === 'folder' && x.id === fo.id); });
@@ -600,8 +718,8 @@ app.get('/api/users/:username', auth, function (req, res) {
   });
 });
 
-app.post('/api/follow/:uid', auth, function (req, res) {
-  const target = db.users[req.params.uid];
+app.post('/api/follow/:uid', auth, badKey, function (req, res) {
+  const target = ownGet(db.users, req.params.uid);
   if (!target) return res.status(404).json({ error: 'User not found' });
   if (target.id === req.user.id) return res.status(400).json({ error: 'That is you' });
   db.follows[req.user.id] = db.follows[req.user.id] || [];
@@ -610,7 +728,7 @@ app.post('/api/follow/:uid', auth, function (req, res) {
   res.json({ ok: true, following: true });
 });
 
-app.delete('/api/follow/:uid', auth, function (req, res) {
+app.delete('/api/follow/:uid', auth, badKey, function (req, res) {
   db.follows[req.user.id] = (db.follows[req.user.id] || []).filter(function (x) { return x !== req.params.uid; });
   save();
   res.json({ ok: true, following: false });
@@ -629,14 +747,14 @@ app.get('/api/favorites', auth, function (req, res) {
   const out = { files: [], folders: [] };
   favKey(u).forEach(function (x) {
     if (x.type === 'file') {
-      const f = db.files[x.id];
+      const f = ownGet(db.files, x.id);
       if (f && canView(f, u)) out.files.push({
         id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public',
         ownerName: dispName(db.users[f.owner]), rawUrl: rawUrl(req, f.id),
         fav: true, role: canDelete(f, u) ? 'owner' : 'editor'
       });
     } else if (x.type === 'folder') {
-      const fo = db.folders[x.id];
+      const fo = ownGet(db.folders, x.id);
       if (fo && canViewFolder(fo, u)) out.folders.push(folderView(fo, req, u));
     }
   });
@@ -650,10 +768,10 @@ app.post('/api/favorites', auth, function (req, res) {
   const fid = String(req.body.id || '');
   if (!type || !fid) return res.status(400).json({ error: 'type and id are required' });
   if (type === 'file') {
-    const f = db.files[fid];
+    const f = ownGet(db.files, fid);
     if (!f || !canView(f, req.user)) return res.status(404).json({ error: 'File not found' });
   } else {
-    const fo = db.folders[fid];
+    const fo = ownGet(db.folders, fid);
     if (!fo || !canViewFolder(fo, req.user)) return res.status(404).json({ error: 'Folder not found' });
   }
   const arr = favKey(req.user);
@@ -666,7 +784,7 @@ app.post('/api/favorites', auth, function (req, res) {
 });
 
 app.get('/raw/:id', function (req, res) {
-  const f = db.files[req.params.id];
+  const f = ownGet(db.files, req.params.id);
   if (!f) return res.status(404).send('Not found');
   const accept = String(req.headers.accept || '').toLowerCase();
   const ua = String(req.headers['user-agent'] || '').toLowerCase();
@@ -862,6 +980,23 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 .dprof .dpn { font-weight: 700; font-size: 14px; word-break: break-all; }
 .dprof .dpu { color: var(--muted); font-size: 11px; word-break: break-all; }
 .avpick { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+.supbox { background: var(--bg2); border: 1px solid var(--line2); border-radius: 11px; padding: 14px; }
+.suprow { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.suplbl { color: var(--muted); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+.supphone { display: flex; align-items: center; gap: 8px; font-size: 15px; letter-spacing: 1px; }
+.supme { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+.supme b { color: var(--fg); }
+.board { display: flex; flex-direction: column; gap: 6px; }
+.brow { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; }
+.brow.me { border-color: var(--fg); }
+.brank { width: 30px; flex: 0 0 auto; font-size: 12px; color: var(--muted); font-weight: 700; }
+.medal { display: inline-flex; align-items: center; justify-content: center; width: 21px; height: 21px; border-radius: 50%; font-size: 11px; color: #000; font-weight: 800; }
+.medal.m1 { background: #ffd166; }
+.medal.m2 { background: #d7d7d7; }
+.medal.m3 { background: #d9a066; }
+.bname { flex: 1; display: flex; align-items: center; gap: 7px; font-size: 13px; min-width: 0; }
+.bname span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bamt { font-size: 12px; font-weight: 700; flex: 0 0 auto; }
 </style>
 </head>
 <body>
@@ -894,11 +1029,14 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     eyeoff: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>',
     back: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>',
     chev: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>',
-    camera: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>'
+    camera: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>',
+    heart: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>',
+    trophy: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"></path><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"></path><path d="M4 22h16"></path><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"></path><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"></path><path d="M18 2H6v7a6 6 0 0 0 12 0V2z"></path></svg>',
+    copy2: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>'
   };
   var T = {
-    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว' },
-    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it' }
+    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', support:'สนับสนุน', support_title:'สนับสนุน', support_phone:'เบอร์พร้อมเพย์ / TrueMoney', support_copy:'คัดลอกเบอร์', support_open:'เปิดแอป TrueMoney', support_amount:'จำนวนเงิน (บาท)', support_ref:'เลขอ้างอิง / โน้ต', support_send:'บันทึกการสนับสนุน', support_board:'อันดับผู้สนับสนุน', support_mine:'ยอดของคุณ', support_rank:'อันดับ', support_none:'ยังไม่มีผู้สนับสนุน', support_thanks:'ขอบคุณมาก!', support_note:'โอนเงินก่อน แล้วค่อยมากรอกจำนวนตรงนี้', support_you:'คุณ' },
+    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', support:'Support', support_title:'Support', support_phone:'TrueMoney phone', support_copy:'Copy number', support_open:'Open TrueMoney', support_amount:'Amount (THB)', support_ref:'Reference / note', support_send:'Record support', support_board:'Top supporters', support_mine:'Your total', support_rank:'Rank', support_none:'No supporters yet', support_thanks:'Thank you!', support_note:'Send the money first, then record it here with the amount.', support_you:'You' }
   };
   var LANG = localStorage.getItem('lang') || 'th';
   function t(k) { var d = T[LANG] || T.th; return d[k] != null ? d[k] : (T.th[k] != null ? T.th[k] : k); }
@@ -928,7 +1066,22 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     var d = Math.floor(h / 24); if (d < 30) return d + ' ' + t('ago_day');
     return fmt(ts);
   }
-  var state = { user: null, files: [], invites: [], folders: [], fav: { files: [], folders: [] }, search: null, q: '', timer: null, following: [], tab: 'files' };
+  var state = { user: null, files: [], invites: [], folders: [], fav: { files: [], folders: [] }, search: null, q: '', timer: null, following: [], tab: 'files', fp: '' };
+  function makeFp() {
+    try {
+      var k = 'fp';
+      var v = localStorage.getItem(k);
+      if (v && v.length >= 16) return v;
+      var buf = new Uint8Array(16);
+      if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(buf);
+      else for (var i = 0; i < 16; i++) buf[i] = Math.floor(Math.random() * 256);
+      var hex = '';
+      for (var j = 0; j < buf.length; j++) hex += ('0' + buf[j].toString(16)).slice(-2);
+      localStorage.setItem(k, hex);
+      return hex;
+    } catch (e) { return ''; }
+  }
+  state.fp = makeFp();
   function brand() { return '<div class="brand"><div class="logo"><img src="https://files.catbox.moe/okwlyx.png" alt=""></div><h1>สกัด HUB</h1></div>'; }
   function renderAuth(mode) {
     var signup = mode === 'signup';
@@ -946,7 +1099,10 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     function submitAuth() {
       var u = document.getElementById('username').value.trim(), p = document.getElementById('password').value;
       var err = document.getElementById('err'); err.style.display = 'none';
-      api(signup ? '/api/signup' : '/api/login', { method: 'POST', body: { username: u, password: p } })
+      var hdrs = { 'Content-Type': 'application/json' };
+      if (signup && state.fp) hdrs['X-Client-FP'] = state.fp;
+      fetch(signup ? '/api/signup' : '/api/login', { method: 'POST', headers: hdrs, body: JSON.stringify({ username: u, password: p }) })
+        .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) throw new Error(d.error || 'Request failed'); return d; }); })
         .then(function (d) { state.user = d.user; renderApp(); loadAll(); })
         .catch(function (e) { err.textContent = e.message; err.style.display = 'block'; });
     }
@@ -1505,6 +1661,55 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
+  function openSupport() {
+    var overlay = document.createElement('div'); overlay.className = 'overlay';
+    overlay.innerHTML = '<div class="modal"><h3>' + ICON.heart + ' ' + t('support_title') + '</h3><div class="body" id="supbody">' +
+      '<div class="hint">' + t('loading') + '</div></div>' +
+      '<div class="foot"><button class="btn ghost" id="supc">' + t('close') + '</button></div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('#supc').onclick = function () { overlay.remove(); };
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+    renderSupport(overlay);
+  }
+  function renderSupport(overlay) {
+    var body = overlay.querySelector('#supbody');
+    api('/api/support').then(function (d) {
+      var me = state.user || {};
+      var html = '<div class="supbox">' +
+        '<div class="suprow"><span class="suplbl">' + t('support_phone') + '</span>' +
+        '<div class="supphone"><b>' + esc(d.phone) + '</b><button class="iconbtn" id="supcopy" title="' + t('support_copy') + '">' + ICON.copy + '</button></div></div>' +
+        (d.link ? '<a class="btn ghost" style="margin-top:10px" href="' + esc(d.link) + '" target="_blank" rel="noopener">' + ICON.link + ' ' + t('support_open') + '</a>' : '') +
+        '<div class="hint">' + t('support_note') + '</div>' +
+        '</div>' +
+        '<div class="field" style="margin-top:14px"><label>' + ICON.heart + ' ' + t('support_amount') + '</label>' +
+        '<input class="input" id="supamt" type="number" min="1" step="1" placeholder="20"></div>' +
+        '<div class="field"><label>' + ICON.info + ' ' + t('support_ref') + '</label>' +
+        '<input class="input" id="supref" maxlength="60" placeholder="' + t('support_ref') + '" spellcheck="false"></div>' +
+        '<button class="btn" id="supsend">' + ICON.check + ' ' + t('support_send') + '</button>' +
+        '<div class="fsec">' + t('support_board') + '</div>' +
+        '<div class="supme">' + t('support_mine') + ': <b>' + (d.myTotal || 0) + ' THB</b>' +
+        (d.myRank ? ' · ' + t('support_rank') + ' #' + d.myRank : '') + '</div>' +
+        (d.board && d.board.length ? '<div class="board">' + d.board.map(function (row) {
+          var isMe = row.uid === me.id;
+          return '<div class="brow' + (isMe ? ' me' : '') + '">' +
+            '<div class="brank">' + (row.rank <= 3 ? '<span class="medal m' + row.rank + '">' + row.rank + '</span>' : '#' + row.rank) + '</div>' +
+            avat(row, 'sm') +
+            '<div class="bname"><span>' + esc(row.nick || row.username) + '</span>' + (isMe ? '<span class="tag">' + t('support_you') + '</span>' : '') + '</div>' +
+            '<div class="bamt">' + row.total + ' THB</div></div>';
+        }).join('') + '</div>' : '<div class="hint">' + t('support_none') + '</div>');
+      body.innerHTML = html;
+      overlay.querySelector('#supcopy').onclick = function () { copyText(d.phone); toast(t('support_copy')); };
+      overlay.querySelector('#supsend').onclick = function () {
+        var amt = Number(overlay.querySelector('#supamt').value);
+        var ref = overlay.querySelector('#supref').value.trim();
+        if (!isFinite(amt) || amt <= 0) { toast(t('support_amount'), true); return; }
+        api('/api/support', { method: 'POST', body: { amount: amt, slip: ref } }).then(function () {
+          toast(t('support_thanks'));
+          renderSupport(overlay);
+        }).catch(function (e) { toast(e.message, true); });
+      };
+    }).catch(function (e) { body.innerHTML = '<div class="hint">' + esc(e.message) + '</div>'; });
+  }
   function openFollowing() {
     var overlay = document.createElement('div'); overlay.className = 'overlay';
     overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.userplus + ' ' + t('following_t') + '</h3><div class="body" id="folbody"><div class="hint">' + t('loading') + '</div></div><div class="foot"><button class="btn ghost" id="folc">' + t('close') + '</button></div></div>';
@@ -1583,6 +1788,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<button class="ditem" id="d-edit">' + ICON.edit + ' ' + t('edit_profile') + '</button>' +
       '<button class="ditem" id="d-fav">' + ICON.star + ' ' + t('nav_fav') + '</button>' +
       '<button class="ditem" id="d-fol">' + ICON.userplus + ' ' + t('following_t') + '</button>' +
+      '<button class="ditem" id="d-sup">' + ICON.heart + ' ' + t('support') + '</button>' +
       '<button class="ditem" id="d-inv">' + ICON.userplus + ' ' + t('invites') + '<span class="dbadge" id="dbadge">' + state.invites.length + '</span></button>' +
       '<div class="ditem dlang"><span>' + t('language') + '</span><div class="langs">' +
       '<button data-lang="th" class="' + (LANG === 'th' ? 'on' : '') + '">ไทย</button>' +
@@ -1597,6 +1803,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     overlay.querySelector('#d-edit').onclick = function () { overlay.remove(); openEditProfile(); };
     overlay.querySelector('#d-fav').onclick = function () { overlay.remove(); renderFavModal(); };
     overlay.querySelector('#d-fol').onclick = function () { overlay.remove(); openFollowing(); };
+    overlay.querySelector('#d-sup').onclick = function () { overlay.remove(); openSupport(); };
     overlay.querySelector('#d-inv').onclick = function () { overlay.remove(); openInvites(); };
     overlay.querySelector('#d-out').onclick = function () {
       api('/api/logout', { method: 'POST' }).then(function () { overlay.remove(); state.user = null; renderAuth('login'); });
