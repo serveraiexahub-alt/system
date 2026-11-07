@@ -414,7 +414,7 @@ main { max-width: 900px; margin: 0 auto; padding: 24px 18px 80px; }
 .actions { display: flex; gap: 8px; }
 .iconbtn { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: 1px solid var(--line2); border-radius: 8px; color: var(--fg); position: relative; }
 .iconbtn:hover { border-color: var(--fg); }
-.badge { position: absolute; top: -6px; right: -6px; background: var(--fg); color: #000; border-radius: 10px; min-width: 16px; height: 16px; font-size: 10px; font-weight: 700; display: none; align-items: center; justify-content: center; padding: 0 4px; }
+.menubadge { position: absolute; top: -4px; right: -4px; width: 9px; height: 9px; border-radius: 50%; background: var(--fg); display: none; }
 .empty { text-align: center; color: var(--muted); padding: 60px 20px; border: 1px dashed var(--line); border-radius: 12px; }
 .empty .i { width: 30px; height: 30px; margin-bottom: 12px; color: var(--muted); }
 .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50; }
@@ -427,15 +427,29 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 .modal .foot .btn { flex: 1; }
 .modal .body .btn { margin-bottom: 10px; }
 .hint { color: var(--muted); font-size: 11px; margin-top: 8px; }
-.toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--fg); color: #000; border-radius: 10px; padding: 12px 16px; font-size: 12px; display: flex; align-items: center; gap: 10px; z-index: 100; max-width: 92vw; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
-.toast input { flex: 1; background: #000; color: #fff; border: none; border-radius: 6px; padding: 7px 9px; font-family: inherit; font-size: 12px; min-width: 0; }
-.toast .copy { background: #000; color: #fff; border: none; border-radius: 6px; padding: 7px 11px; font-size: 11px; white-space: nowrap; }
+.uploadbtn { margin-bottom: 6px; }
 .hist { border-bottom: 1px solid var(--line); padding: 10px 0; font-size: 12px; }
 .hist .hw { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
 .hist .plus { color: #b9ffb9; }
 .hist .minus { color: #ffb9b9; }
 .inv { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line); padding: 12px 0; }
 .inv .inva { display: flex; gap: 8px; flex: 0 0 auto; }
+.drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 60; display: flex; justify-content: flex-end; }
+.drawer { width: 290px; max-width: 84vw; background: var(--panel); border-left: 1px solid var(--line2); height: 100%; padding: 20px 16px; display: flex; flex-direction: column; gap: 6px; animation: slidein .18s ease; }
+@keyframes slidein { from { transform: translateX(100%); } to { transform: translateX(0); } }
+.dhead { display: flex; align-items: center; gap: 10px; padding-bottom: 16px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+.dhead .logo { width: 38px; height: 38px; border: 1px solid var(--fg); border-radius: 9px; overflow: hidden; flex: 0 0 auto; }
+.dhead .logo img { width: 100%; height: 100%; object-fit: cover; }
+.dhead .dname { font-weight: 700; letter-spacing: 1px; }
+.dhead .duser { color: var(--muted); font-size: 12px; word-break: break-all; }
+.ditem { display: flex; align-items: center; gap: 10px; width: 100%; background: transparent; border: 1px solid transparent; color: var(--fg); border-radius: 9px; padding: 11px 12px; font-size: 13px; text-align: left; }
+.ditem:hover { border-color: var(--line2); background: var(--bg2); }
+.ditem .dbadge { margin-left: auto; background: var(--fg); color: #000; border-radius: 9px; font-size: 10px; padding: 1px 7px; font-weight: 700; }
+.dlang { flex-direction: column; align-items: stretch; gap: 8px; }
+.dlang > span { font-size: 11px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+.langs { display: flex; gap: 8px; }
+.langs button { flex: 1; background: transparent; border: 1px solid var(--line2); color: var(--fg); border-radius: 8px; padding: 8px; font-size: 12px; }
+.langs button.on { background: var(--fg); color: #000; border-color: var(--fg); font-weight: 700; }
 </style>
 </head>
 <body>
@@ -458,8 +472,17 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     userplus: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>',
     info: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>',
     check: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>',
-    x: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>'
+    x: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>',
+    menu: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>'
   };
+  var T = {
+    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว' },
+    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago' }
+  };
+  var LANG = localStorage.getItem('lang') || 'th';
+  function t(k) { var d = T[LANG] || T.th; return d[k] != null ? d[k] : (T.th[k] != null ? T.th[k] : k); }
+  function setLang(l) { LANG = l; try { localStorage.setItem('lang', l); } catch (e) {} closeOverlays(); boot(); }
+  function closeOverlays() { var o = document.querySelectorAll('.overlay,.drawer-overlay'); Array.prototype.forEach.call(o, function (n) { n.remove(); }); }
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function api(path, opts) {
     opts = opts || {};
@@ -478,10 +501,10 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   function fmt(ts) { var d = new Date(ts), p = function (n) { return (n < 10 ? '0' : '') + n; }; return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()); }
   function rel(ts) {
     var s = Math.floor((Date.now() - ts) / 1000);
-    if (s < 60) return s + ' วินาทีที่แล้ว';
-    var m = Math.floor(s / 60); if (m < 60) return m + ' นาทีที่แล้ว';
-    var h = Math.floor(m / 60); if (h < 24) return h + ' ชั่วโมงที่แล้ว';
-    var d = Math.floor(h / 24); if (d < 30) return d + ' วันที่แล้ว';
+    if (s < 60) return s + ' ' + t('ago_sec');
+    var m = Math.floor(s / 60); if (m < 60) return m + ' ' + t('ago_min');
+    var h = Math.floor(m / 60); if (h < 24) return h + ' ' + t('ago_hour');
+    var d = Math.floor(h / 24); if (d < 30) return d + ' ' + t('ago_day');
     return fmt(ts);
   }
   var state = { user: null, files: [], invites: [] };
@@ -489,12 +512,12 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   function renderAuth(mode) {
     var signup = mode === 'signup';
     app.innerHTML = '<div class="auth-wrap"><div class="card">' + brand() +
-      '<div class="sub">' + (signup ? 'Create your account' : 'Sign in to your account') + '</div>' +
+      '<div class="sub">' + t(signup ? 'sub_signup' : 'sub_login') + '</div>' +
       '<div class="err" id="err"></div>' +
-      '<div class="field"><label>' + ICON.user + ' Username</label><input class="input" id="username" autocomplete="username" spellcheck="false"></div>' +
-      '<div class="field"><label>' + ICON.lock + ' Password</label><input class="input" id="password" type="password" autocomplete="' + (signup ? 'new-password' : 'current-password') + '"></div>' +
-      '<button class="btn" id="go">' + (signup ? 'Create account' : 'Sign in') + '</button>' +
-      '<div class="switch">' + (signup ? 'Already have an account? <a href="#" id="sw">Sign in</a>' : 'No account? <a href="#" id="sw">Create one</a>') + '</div></div></div>';
+      '<div class="field"><label>' + ICON.user + ' ' + t('username') + '</label><input class="input" id="username" autocomplete="username" spellcheck="false"></div>' +
+      '<div class="field"><label>' + ICON.lock + ' ' + t('password') + '</label><input class="input" id="password" type="password" autocomplete="' + (signup ? 'new-password' : 'current-password') + '"></div>' +
+      '<button class="btn" id="go">' + t(signup ? 'signup' : 'login') + '</button>' +
+      '<div class="switch">' + (signup ? t('have_account') + ' <a href="#" id="sw">' + t('login') + '</a>' : t('no_account') + ' <a href="#" id="sw">' + t('signup') + '</a>') + '</div></div></div>';
     document.getElementById('sw').onclick = function (e) { e.preventDefault(); renderAuth(signup ? 'login' : 'signup'); };
     document.getElementById('go').onclick = submitAuth;
     document.getElementById('password').onkeydown = function (e) { if (e.key === 'Enter') submitAuth(); };
@@ -509,44 +532,42 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   }
   function renderApp() {
     app.innerHTML = '<header>' + brand() + '<div class="right">' +
-      '<button class="iconbtn" id="invbtn" title="คำเชิญ">' + ICON.userplus + '<span class="badge" id="invbadge"></span></button>' +
       '<div class="who">' + ICON.user + '<span>' + esc(state.user.username) + '</span></div>' +
-      '<button class="iconbtn" id="logout" title="Sign out">' + ICON.logout + '</button></div></header>' +
-      '<main><div class="bar"><h2>Files</h2><button class="btn small" id="new">' + ICON.plus + ' New file</button></div><div class="grid" id="grid"></div></main>';
-    document.getElementById('logout').onclick = function () { api('/api/logout', { method: 'POST' }).then(function () { state.user = null; renderAuth('login'); }); };
+      '<button class="iconbtn" id="menu" title="' + t('account') + '">' + ICON.menu + '<span class="menubadge" id="menubadge"></span></button>' +
+      '</div></header>' +
+      '<main><div class="bar"><h2>' + t('files') + '</h2><button class="btn small" id="new">' + ICON.plus + ' ' + t('new_file') + '</button></div><div class="grid" id="grid"></div></main>';
+    document.getElementById('menu').onclick = function () { openDrawer(); };
     document.getElementById('new').onclick = function () { openModal(); };
-    document.getElementById('invbtn').onclick = function () { openInvites(); };
   }
   function loadFiles() { api('/api/files').then(function (d) { state.files = d.files; renderFiles(); }).catch(function () { renderAuth('login'); }); }
   function loadInvites() {
     api('/api/invites').then(function (d) {
       state.invites = d.invites || [];
-      var b = document.getElementById('invbadge');
-      if (!b) return;
-      if (state.invites.length) { b.textContent = state.invites.length; b.style.display = 'inline-flex'; } else b.style.display = 'none';
+      var b = document.getElementById('menubadge');
+      if (b) b.style.display = state.invites.length ? 'block' : 'none';
     }).catch(function () {});
   }
   function renderFiles() {
     var grid = document.getElementById('grid'); if (!grid) return;
-    if (!state.files.length) { grid.innerHTML = '<div class="empty">' + ICON.file + '<div>No files yet</div><div style="margin-top:6px">Create your first script</div></div>'; return; }
+    if (!state.files.length) { grid.innerHTML = '<div class="empty">' + ICON.file + '<div>' + t('no_files') + '</div><div style="margin-top:6px">' + t('create_first') + '</div></div>'; return; }
     grid.innerHTML = state.files.map(function (f) {
       var isOwner = f.role === 'owner';
-      var tag = isOwner ? '' : '<span class="tag">แชร์</span>';
-      var del = isOwner ? '<button class="iconbtn rm" title="Delete">' + ICON.trash + '</button>' : '';
+      var tag = isOwner ? '' : '<span class="tag">' + t('shared') + '</span>';
+      var del = isOwner ? '<button class="iconbtn rm" title="' + t('delete') + '">' + ICON.trash + '</button>' : '';
       return '<div class="file" data-id="' + esc(f.id) + '">' +
         '<div class="top"><div class="nm">' + ICON.file + '<span>' + esc(f.name) + '</span>' + tag + '</div>' +
-        '<div class="meta">' + fmt(f.updated) + (isOwner ? '' : '<br>โดย ' + esc(f.ownerName)) + '</div></div>' +
-        '<div class="raw"><span class="lbl">' + ICON.link + ' LOADER</span><input readonly value="' + esc(loader(f.rawUrl)) + '"><button class="iconbtn cp" title="Copy">' + ICON.copy + '</button></div>' +
-        '<div class="actions"><button class="iconbtn ed" title="Edit">' + ICON.edit + '</button>' + del + '<button class="iconbtn more" title="More">' + ICON.more + '</button></div></div>';
+        '<div class="meta">' + fmt(f.updated) + (isOwner ? '' : '<br>' + t('by') + ' ' + esc(f.ownerName)) + '</div></div>' +
+        '<div class="raw"><span class="lbl">' + ICON.link + ' LOADER</span><input readonly value="' + esc(loader(f.rawUrl)) + '"><button class="iconbtn cp" title="' + t('copy') + '">' + ICON.copy + '</button></div>' +
+        '<div class="actions"><button class="iconbtn ed" title="' + t('edit') + '">' + ICON.edit + '</button>' + del + '<button class="iconbtn more" title="' + t('options') + '">' + ICON.more + '</button></div></div>';
     }).join('');
     var nodes = grid.querySelectorAll('.file');
     Array.prototype.forEach.call(nodes, function (node) {
       var id = node.getAttribute('data-id'), f = null;
       for (var k = 0; k < state.files.length; k++) if (state.files[k].id === id) f = state.files[k];
-      node.querySelector('.cp').onclick = function () { var v = node.querySelector('.raw input').value; copyText(v); };
+      node.querySelector('.cp').onclick = function () { copyText(node.querySelector('.raw input').value); };
       node.querySelector('.ed').onclick = function () { openModal(id); };
       if (node.querySelector('.rm')) node.querySelector('.rm').onclick = function () {
-        if (!confirm('Delete this file? The raw link will stop working.')) return;
+        if (!confirm(t('delete') + '?')) return;
         api('/api/files/' + id, { method: 'DELETE' }).then(loadFiles).catch(function (e) { alert(e.message); });
       };
       node.querySelector('.more').onclick = function () { openMenu(id, f && f.role === 'owner'); };
@@ -556,16 +577,16 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     var editing = !!id;
     var overlay = document.createElement('div'); overlay.className = 'overlay';
     overlay.innerHTML = '<div class="modal">' +
-      '<h3>' + (editing ? ICON.edit + ' แก้ไขไฟล์' : ICON.plus + ' สร้างไฟล์ใหม่') + '</h3>' +
+      '<h3>' + (editing ? ICON.edit + ' ' + t('edit_file') : ICON.plus + ' ' + t('create_file')) + '</h3>' +
       '<div class="body">' +
-      '<div class="field"><label>' + ICON.file + ' ชื่อไฟล์</label><input class="input" id="fname" placeholder="myscript" spellcheck="false"></div>' +
-      '<div class="field"><label>' + ICON.code + ' โค้ด</label><textarea class="input" id="fcode" placeholder="print(&quot;hello&quot;)"></textarea></div>' +
-      '<div class="field"><label>' + ICON.file + ' อัปโหลดไฟล์</label>' +
-      '<button class="btn ghost uploadbtn" id="fpick" type="button">' + ICON.file + ' เลือกไฟล์</button>' +
+      '<div class="field"><label>' + ICON.file + ' ' + t('file_name') + '</label><input class="input" id="fname" placeholder="myscript" spellcheck="false"></div>' +
+      '<div class="field"><label>' + ICON.code + ' ' + t('code') + '</label><textarea class="input" id="fcode" placeholder="print(&quot;hello&quot;)"></textarea></div>' +
+      '<div class="field"><label>' + ICON.file + ' ' + t('upload_file') + '</label>' +
+      '<button class="btn ghost uploadbtn" id="fpick" type="button">' + ICON.file + ' ' + t('choose_file') + '</button>' +
       '<input type="file" id="ffile" accept=".lua,.txt,.js,.json,text/plain" style="display:none">' +
-      '<div class="hint" id="ffname">ยังไม่ได้เลือกไฟล์</div></div>' +
-      '<div class="hint">ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย</div></div>' +
-      '<div class="foot"><button class="btn ghost" id="cancel">ยกเลิก</button><button class="btn" id="save">' + (editing ? 'บันทึก' : 'สร้าง') + '</button></div></div>';
+      '<div class="hint" id="ffname">' + t('no_file') + '</div></div>' +
+      '<div class="hint">' + t('raw_hint') + '</div></div>' +
+      '<div class="foot"><button class="btn ghost" id="cancel">' + t('cancel') + '</button><button class="btn" id="save">' + (editing ? t('save') : t('create')) + '</button></div></div>';
     document.body.appendChild(overlay);
     var nameEl = overlay.querySelector('#fname'), codeEl = overlay.querySelector('#fcode');
     overlay.querySelector('#fpick').onclick = function () { overlay.querySelector('#ffile').click(); };
@@ -581,17 +602,17 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     overlay.querySelector('#cancel').onclick = function () { overlay.remove(); };
     overlay.querySelector('#save').onclick = function () {
       api(editing ? '/api/files/' + id : '/api/files', { method: editing ? 'PUT' : 'POST', body: { name: nameEl.value.trim(), code: codeEl.value } })
-        .then(function (d) { overlay.remove(); loadFiles(); })
+        .then(function () { overlay.remove(); loadFiles(); })
         .catch(function (e) { alert(e.message); });
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
   function openMenu(id, isOwner) {
     var overlay = document.createElement('div'); overlay.className = 'overlay';
-    overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.more + ' ตัวเลือก</h3><div class="body">' +
-      '<button class="btn ghost" id="m-info">' + ICON.info + ' ข้อมูล</button>' +
-      (isOwner ? '<button class="btn ghost" id="m-invite">' + ICON.userplus + ' เชิญผู้ใช้คนอื่น</button>' : '') +
-      '</div><div class="foot"><button class="btn ghost" id="m-close">ปิด</button></div></div>';
+    overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.more + ' ' + t('options') + '</h3><div class="body">' +
+      '<button class="btn ghost" id="m-info">' + ICON.info + ' ' + t('info') + '</button>' +
+      (isOwner ? '<button class="btn ghost" id="m-invite">' + ICON.userplus + ' ' + t('invite_others') + '</button>' : '') +
+      '</div><div class="foot"><button class="btn ghost" id="m-close">' + t('close') + '</button></div></div>';
     document.body.appendChild(overlay);
     overlay.querySelector('#m-close').onclick = function () { overlay.remove(); };
     overlay.querySelector('#m-info').onclick = function () { overlay.remove(); openInfo(id); };
@@ -600,51 +621,51 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   }
   function openInfo(id) {
     var overlay = document.createElement('div'); overlay.className = 'overlay';
-    overlay.innerHTML = '<div class="modal"><h3>' + ICON.info + ' ข้อมูล</h3><div class="body" id="histbody"><div class="hint">กำลังโหลด...</div></div><div class="foot"><button class="btn ghost" id="ic">ปิด</button></div></div>';
+    overlay.innerHTML = '<div class="modal"><h3>' + ICON.info + ' ' + t('info') + '</h3><div class="body" id="histbody"><div class="hint">' + t('loading') + '</div></div><div class="foot"><button class="btn ghost" id="ic">' + t('close') + '</button></div></div>';
     document.body.appendChild(overlay);
     overlay.querySelector('#ic').onclick = function () { overlay.remove(); };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
     api('/api/files/' + id + '/history').then(function (d) {
       var h = (d.history || []).slice().reverse(), body = overlay.querySelector('#histbody');
-      if (!h.length) { body.innerHTML = '<div class="hint">ยังไม่มีการอัปเดต</div>'; return; }
+      if (!h.length) { body.innerHTML = '<div class="hint">' + t('no_updates') + '</div>'; return; }
       body.innerHTML = h.map(function (e) {
         return '<div class="hist"><div class="hw">' + rel(e.ts) + ' · ' + fmt(e.ts) + '</div>' +
-          '<div><span class="plus">+ ' + e.charsAdded + ' ตัวอักษร / + ' + e.linesAdded + ' บรรทัด</span><br>' +
-          '<span class="minus">- ' + e.charsRemoved + ' ตัวอักษร / - ' + e.linesRemoved + ' บรรทัด</span></div></div>';
+          '<div><span class="plus">+ ' + e.charsAdded + ' ' + t('chars') + ' / + ' + e.linesAdded + ' ' + t('lines') + '</span><br>' +
+          '<span class="minus">- ' + e.charsRemoved + ' ' + t('chars') + ' / - ' + e.linesRemoved + ' ' + t('lines') + '</span></div></div>';
       }).join('');
     }).catch(function (e) { overlay.querySelector('#histbody').textContent = e.message; });
   }
   function openInvite(id) {
     var overlay = document.createElement('div'); overlay.className = 'overlay';
-    overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.userplus + ' เชิญผู้ใช้</h3><div class="body">' +
-      '<div class="field"><label>' + ICON.user + ' ชื่อผู้ใช้</label><input class="input" id="ivname" placeholder="username" spellcheck="false"></div>' +
-      '<div class="hint">ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้</div></div>' +
-      '<div class="foot"><button class="btn ghost" id="ivcancel">ยกเลิก</button><button class="btn" id="ivsend">เชิญ</button></div></div>';
+    overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.userplus + ' ' + t('invite_user') + '</h3><div class="body">' +
+      '<div class="field"><label>' + ICON.user + ' ' + t('username') + '</label><input class="input" id="ivname" placeholder="username" spellcheck="false"></div>' +
+      '<div class="hint">' + t('invite_hint') + '</div></div>' +
+      '<div class="foot"><button class="btn ghost" id="ivcancel">' + t('cancel') + '</button><button class="btn" id="ivsend">' + t('invite') + '</button></div></div>';
     document.body.appendChild(overlay);
     var inp = overlay.querySelector('#ivname'); inp.focus();
     overlay.querySelector('#ivcancel').onclick = function () { overlay.remove(); };
     overlay.querySelector('#ivsend').onclick = function () {
       api('/api/files/' + id + '/invite', { method: 'POST', body: { username: inp.value.trim() } })
-        .then(function () { overlay.remove(); alert('ส่งคำเชิญแล้ว'); })
+        .then(function () { overlay.remove(); alert(t('invited_sent')); })
         .catch(function (e) { alert(e.message); });
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
   function openInvites() {
     var overlay = document.createElement('div'); overlay.className = 'overlay';
-    overlay.innerHTML = '<div class="modal"><h3>' + ICON.userplus + ' คำเชิญ</h3><div class="body" id="invbody"></div><div class="foot"><button class="btn ghost" id="ivx">ปิด</button></div></div>';
+    overlay.innerHTML = '<div class="modal"><h3>' + ICON.userplus + ' ' + t('invites') + '</h3><div class="body" id="invbody"></div><div class="foot"><button class="btn ghost" id="ivx">' + t('close') + '</button></div></div>';
     document.body.appendChild(overlay);
     overlay.querySelector('#ivx').onclick = function () { overlay.remove(); };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
     renderInvites(overlay);
   }
   function renderInvites(overlay) {
-    var body = overlay.querySelector('#invbody'); body.innerHTML = '<div class="hint">กำลังโหลด...</div>';
+    var body = overlay.querySelector('#invbody'); body.innerHTML = '<div class="hint">' + t('loading') + '</div>';
     api('/api/invites').then(function (d) {
       var list = d.invites || [];
-      if (!list.length) { body.innerHTML = '<div class="hint">ไม่มีคำเชิญ</div>'; return; }
+      if (!list.length) { body.innerHTML = '<div class="hint">' + t('no_invites') + '</div>'; return; }
       body.innerHTML = list.map(function (it) {
-        return '<div class="inv"><div><b>' + esc(it.name) + '</b><div class="hint">จาก ' + esc(it.ownerName) + '</div></div>' +
+        return '<div class="inv"><div><b>' + esc(it.name) + '</b><div class="hint">' + t('from') + ' ' + esc(it.ownerName) + '</div></div>' +
           '<div class="inva"><button class="btn small ok" data-id="' + esc(it.fileId) + '">' + ICON.check + '</button>' +
           '<button class="btn small ghost no" data-id="' + esc(it.fileId) + '">' + ICON.x + '</button></div></div>';
       }).join('');
@@ -657,6 +678,29 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       .then(function () { loadInvites(); loadFiles(); renderInvites(overlay); })
       .catch(function (e) { alert(e.message); });
   }
+  function openDrawer() {
+    var overlay = document.createElement('div'); overlay.className = 'drawer-overlay';
+    overlay.innerHTML = '<aside class="drawer">' +
+      '<div class="dhead"><div class="logo"><img src="https://files.catbox.moe/okwlyx.png" alt=""></div><div><div class="dname">สกัด HUB</div><div class="duser">' + esc(state.user.username) + '</div></div></div>' +
+      '<button class="ditem" id="d-inv">' + ICON.userplus + ' ' + t('invites') + '<span class="dbadge" id="dbadge">' + state.invites.length + '</span></button>' +
+      '<div class="ditem dlang"><span>' + t('language') + '</span><div class="langs">' +
+      '<button data-lang="th" class="' + (LANG === 'th' ? 'on' : '') + '">ไทย</button>' +
+      '<button data-lang="en" class="' + (LANG === 'en' ? 'on' : '') + '">EN</button>' +
+      '</div></div>' +
+      '<a class="ditem" href="https://discord.gg/tgVTJ9veXk" target="_blank" rel="noopener">' + ICON.link + ' ' + t('discord') + '</a>' +
+      '<button class="ditem" id="d-out">' + ICON.logout + ' ' + t('signout') + '</button>' +
+      '</aside>';
+    document.body.appendChild(overlay);
+    var db = overlay.querySelector('#dbadge'); if (db && !state.invites.length) db.style.display = 'none';
+    overlay.querySelector('#d-inv').onclick = function () { overlay.remove(); openInvites(); };
+    overlay.querySelector('#d-out').onclick = function () {
+      api('/api/logout', { method: 'POST' }).then(function () { overlay.remove(); state.user = null; renderAuth('login'); });
+    };
+    Array.prototype.forEach.call(overlay.querySelectorAll('.langs button'), function (b) {
+      b.onclick = function () { setLang(b.getAttribute('data-lang')); };
+    });
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+  }
   function boot() {
     api('/api/me').then(function (d) {
       state.user = d.user;
@@ -668,7 +712,6 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 </script>
 </body>
 </html>`;
-
 app.listen(PORT, function () {
   console.log(APP_NAME + ' listening on http://localhost:' + PORT);
 });
