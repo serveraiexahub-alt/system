@@ -44,6 +44,10 @@ function ensureDb() {
   db.folders = db.folders || {};
   db.follows = db.follows || {};
   db.favorites = db.favorites || {};
+  Object.values(db.users).forEach(function (u) {
+    if (typeof u.nick !== 'string') u.nick = '';
+    if (typeof u.avatar !== 'string') u.avatar = '';
+  });
   Object.values(db.files).forEach(function (f) {
     if (f.visibility !== 'private') f.visibility = 'public';
     if (f.folder === undefined) f.folder = null;
@@ -110,7 +114,7 @@ function userFromReq(req) {
   const p = unsign(parseCookies(req).token);
   if (!p || !p.uid) return null;
   const u = db.users[p.uid];
-  return u ? { id: u.id, username: u.username } : null;
+  return u ? { id: u.id, username: u.username, nick: u.nick || '', avatar: u.avatar || '' } : null;
 }
 
 function auth(req, res, next) {
@@ -162,7 +166,11 @@ function userByName(name) {
 }
 function userPfx(u) {
   if (!u) return '?';
-  return { id: u.id, username: u.username };
+  return { id: u.id, username: u.username, nick: u.nick || '', avatar: u.avatar || '' };
+}
+function dispName(u) {
+  if (!u) return '?';
+  return u.nick || u.username;
 }
 function folderLastUpdated(fo) {
   let ts = fo.updated || fo.created || 0;
@@ -257,6 +265,25 @@ app.get('/api/me', function (req, res) {
   res.json({ user: userFromReq(req) });
 });
 
+app.put('/api/profile', auth, function (req, res) {
+  const u = db.users[req.user.id];
+  if (!u) return res.status(404).json({ error: 'User not found' });
+  const body = req.body || {};
+  if (body.nick !== undefined) {
+    const n = String(body.nick).trim();
+    if (n.length > 32) return res.status(400).json({ error: 'Nickname too long (max 32)' });
+    u.nick = n;
+  }
+  if (body.avatar !== undefined) {
+    const a = String(body.avatar).trim();
+    if (a.length > 400000) return res.status(413).json({ error: 'Image too large (max 300 KB)' });
+    if (a && !/^data:image\/(png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(a)) return res.status(400).json({ error: 'Invalid image data' });
+    u.avatar = a;
+  }
+  save();
+  res.json({ ok: true, user: { id: u.id, username: u.username, nick: u.nick || '', avatar: u.avatar || '' } });
+});
+
 app.get('/api/files', auth, function (req, res) {
   const u = req.user;
   const list = Object.values(db.files)
@@ -267,7 +294,7 @@ app.get('/api/files', auth, function (req, res) {
         id: f.id, name: f.name, created: f.created, updated: f.updated,
         rawUrl: rawUrl(req, f.id),
         role: f.owner === u.id ? 'owner' : 'editor',
-        ownerName: owner ? owner.username : '?',
+        ownerName: dispName(owner),
         folder: f.folder || null,
         visibility: f.visibility || 'public',
         fav: isFav(u, 'file', f.id)
@@ -302,7 +329,7 @@ app.post('/api/files', auth, function (req, res) {
 app.get('/api/files/:id', auth, function (req, res) {
   const f = db.files[req.params.id];
   if (!f || !canView(f, req.user)) return res.status(404).json({ error: 'File not found' });
-  res.json({ id: f.id, name: f.name, code: f.code, role: canDelete(f, req.user) ? 'owner' : 'editor', folder: f.folder || null, visibility: f.visibility || 'public', ownerName: (db.users[f.owner] || {}).username || '?', fav: isFav(req.user, 'file', f.id) });
+  res.json({ id: f.id, name: f.name, code: f.code, role: canDelete(f, req.user) ? 'owner' : 'editor', folder: f.folder || null, visibility: f.visibility || 'public', ownerName: dispName(db.users[f.owner]), fav: isFav(req.user, 'file', f.id) });
 });
 
 app.put('/api/files/:id', auth, function (req, res) {
@@ -376,7 +403,7 @@ app.get('/api/invites', auth, function (req, res) {
   Object.values(db.files).forEach(function (f) {
     if ((f.invites || []).indexOf(req.user.id) >= 0) {
       const owner = db.users[f.owner];
-      out.push({ fileId: f.id, name: f.name, ownerName: owner ? owner.username : '?' });
+      out.push({ fileId: f.id, name: f.name, ownerName: dispName(owner) });
     }
   });
   res.json({ invites: out });
@@ -412,14 +439,14 @@ function folderView(fo, req, u) {
   });
   const files = ids.map(function (fid) {
     const f = db.files[fid];
-    return { id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public', ownerName: (db.users[f.owner] || {}).username || '?', rawUrl: rawUrl(req, f.id), fav: isFav(u, 'file', f.id) };
+    return { id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public', ownerName: dispName(db.users[f.owner]), rawUrl: rawUrl(req, f.id), fav: isFav(u, 'file', f.id) };
   }).sort(function (a, b) { return b.updated - a.updated; });
   let last = fo.updated || fo.created || 0;
   ids.forEach(function (fid) { if (db.files[fid].updated > last) last = db.files[fid].updated; });
   return {
     id: fo.id, name: fo.name, created: fo.created, updated: last,
     visibility: fo.visibility || 'public',
-    ownerName: owner ? owner.username : '?',
+    ownerName: dispName(owner),
     role: fo.owner === u.id ? 'owner' : 'viewer',
     count: ids.length,
     files: files,
@@ -516,11 +543,11 @@ app.get('/api/search', auth, function (req, res) {
   const q = String(req.query.q || '').trim().toLowerCase();
   if (!q) return res.json({ users: [], files: [], folders: [] });
   const users = Object.values(db.users)
-    .filter(function (x) { return x.id !== u.id && x.username.indexOf(q) >= 0; })
+    .filter(function (x) { return x.id !== u.id && (x.username.indexOf(q) >= 0 || String(x.nick || '').toLowerCase().indexOf(q) >= 0); })
     .slice(0, 20)
     .map(function (x) {
       const fol = db.follows[u.id] || [];
-      return { id: x.id, username: x.username, following: fol.indexOf(x.id) >= 0 };
+      return { id: x.id, username: x.username, nick: x.nick || '', avatar: x.avatar || '', following: fol.indexOf(x.id) >= 0 };
     });
   const files = Object.values(db.files)
     .filter(function (f) { return f.name.toLowerCase().indexOf(q) >= 0 && canView(f, u); })
@@ -528,7 +555,7 @@ app.get('/api/search', auth, function (req, res) {
     .map(function (f) {
       return {
         id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public',
-        ownerName: (db.users[f.owner] || {}).username || '?',
+        ownerName: dispName(db.users[f.owner]),
         rawUrl: rawUrl(req, f.id), fav: isFav(u, 'file', f.id),
         role: canDelete(f, u) ? 'owner' : ((f.shares || []).indexOf(u.id) >= 0 ? 'editor' : 'viewer'),
         folder: f.folder || null
@@ -553,7 +580,7 @@ app.get('/api/users/:username', auth, function (req, res) {
     .map(function (f) {
       return {
         id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public',
-        ownerName: target.username, rawUrl: rawUrl(req, f.id), fav: isFav(u, 'file', f.id),
+        ownerName: dispName(target), rawUrl: rawUrl(req, f.id), fav: isFav(u, 'file', f.id),
         role: canDelete(f, u) ? 'owner' : ((f.shares || []).indexOf(u.id) >= 0 ? 'editor' : 'viewer'),
         folder: f.folder || null
       };
@@ -564,7 +591,7 @@ app.get('/api/users/:username', auth, function (req, res) {
     .map(function (fo) { return folderView(fo, req, u); })
     .sort(function (a, b) { return b.updated - a.updated; });
   res.json({
-    user: { id: target.id, username: target.username, created: target.created },
+    user: { id: target.id, username: target.username, nick: target.nick || '', avatar: target.avatar || '', created: target.created },
     following: fol.indexOf(target.id) >= 0,
     isSelf: target.id === u.id,
     followers: followers.length,
@@ -592,7 +619,7 @@ app.delete('/api/follow/:uid', auth, function (req, res) {
 app.get('/api/following', auth, function (req, res) {
   const ids = db.follows[req.user.id] || [];
   const list = ids.map(function (x) { return db.users[x]; }).filter(Boolean).map(function (x) {
-    return { id: x.id, username: x.username };
+    return { id: x.id, username: x.username, nick: x.nick || '', avatar: x.avatar || '' };
   });
   res.json({ following: list });
 });
@@ -605,7 +632,7 @@ app.get('/api/favorites', auth, function (req, res) {
       const f = db.files[x.id];
       if (f && canView(f, u)) out.files.push({
         id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public',
-        ownerName: (db.users[f.owner] || {}).username || '?', rawUrl: rawUrl(req, f.id),
+        ownerName: dispName(db.users[f.owner]), rawUrl: rawUrl(req, f.id),
         fav: true, role: canDelete(f, u) ? 'owner' : 'editor'
       });
     } else if (x.type === 'folder') {
@@ -806,6 +833,35 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 .pfhead { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .pfhead .i { width: 26px; height: 26px; }
 .pfhead .pn { font-weight: 700; letter-spacing: 1px; font-size: 16px; word-break: break-all; }
+.searchtop { position: relative; margin-bottom: 14px; }
+.searchtop .si { width: 100%; background: var(--bg2); border: 1px solid var(--line2); color: var(--fg); border-radius: 10px; padding: 11px 12px 11px 38px; font-family: inherit; font-size: 13px; }
+.searchtop .si:focus { outline: none; border-color: var(--fg); }
+.searchtop .sic { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); display: flex; pointer-events: none; }
+.searchtop .sic .i { width: 16px; height: 16px; }
+.toastwrap { position: fixed; left: 50%; transform: translateX(-50%); bottom: 22px; z-index: 95; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+.toastmsg { background: var(--fg); color: #000; border-radius: 9px; padding: 9px 15px; font-size: 12px; font-weight: 700; max-width: 80vw; animation: toastin .18s ease; }
+.toastmsg.bad { background: #ffb9b9; }
+@keyframes toastin { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.avat { width: 30px; height: 30px; border-radius: 50%; overflow: hidden; border: 1px solid var(--line2); display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: var(--bg2); }
+.avat img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.avat.big { width: 58px; height: 58px; }
+.avat.sm { width: 22px; height: 22px; }
+.who .avat { width: 24px; height: 24px; }
+.seg { display: flex; background: var(--bg2); border: 1px solid var(--line2); border-radius: 10px; padding: 3px; gap: 3px; }
+.seg button { flex: 1; background: transparent; border: 0; color: var(--muted); border-radius: 7px; padding: 9px 6px; font-size: 12px; font-family: inherit; }
+.seg button.on { background: var(--fg); color: #000; font-weight: 700; }
+.pick { position: relative; }
+.pick .pkbtn { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--bg2); border: 1px solid var(--line2); color: var(--fg); border-radius: 9px; padding: 11px 12px; font-family: inherit; font-size: 13px; text-align: left; }
+.pick .pkbtn .pkl { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pick .pkbtn .pkl span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick .pklist { position: absolute; left: 0; right: 0; top: calc(100% + 6px); background: var(--panel); border: 1px solid var(--line2); border-radius: 10px; padding: 6px; z-index: 8; max-height: 210px; overflow: auto; box-shadow: 0 12px 30px rgba(0,0,0,.6); }
+.pick .pkitem { width: 100%; display: flex; align-items: center; gap: 8px; background: transparent; border: 0; color: var(--fg); border-radius: 7px; padding: 9px 10px; font-size: 12px; font-family: inherit; text-align: left; }
+.pick .pkitem:hover { background: var(--bg2); }
+.pick .pkitem.on { background: var(--fg); color: #000; font-weight: 700; }
+.dprof { display: flex; align-items: center; gap: 11px; padding: 2px 4px 16px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+.dprof .dpn { font-weight: 700; font-size: 14px; word-break: break-all; }
+.dprof .dpu { color: var(--muted); font-size: 11px; word-break: break-all; }
+.avpick { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
 </style>
 </head>
 <body>
@@ -836,11 +892,13 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     starfill: '<svg class="i" viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>',
     eye: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>',
     eyeoff: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>',
-    back: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>'
+    back: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>',
+    chev: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>',
+    camera: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>'
   };
   var T = {
-    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'ย้ายเข้าโฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น' },
-    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Search', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Add to favorites', rm_fav:'Remove from favorites', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Private', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Move to folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility' }
+    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว' },
+    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it' }
   };
   var LANG = localStorage.getItem('lang') || 'th';
   function t(k) { var d = T[LANG] || T.th; return d[k] != null ? d[k] : (T.th[k] != null ? T.th[k] : k); }
@@ -870,7 +928,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     var d = Math.floor(h / 24); if (d < 30) return d + ' ' + t('ago_day');
     return fmt(ts);
   }
-  var state = { user: null, files: [], invites: [], folders: [], fav: { files: [], folders: [] }, search: null, tab: 'files', q: '', timer: null };
+  var state = { user: null, files: [], invites: [], folders: [], fav: { files: [], folders: [] }, search: null, q: '', timer: null, following: [], tab: 'files' };
   function brand() { return '<div class="brand"><div class="logo"><img src="https://files.catbox.moe/okwlyx.png" alt=""></div><h1>สกัด HUB</h1></div>'; }
   function renderAuth(mode) {
     var signup = mode === 'signup';
@@ -889,40 +947,114 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       var u = document.getElementById('username').value.trim(), p = document.getElementById('password').value;
       var err = document.getElementById('err'); err.style.display = 'none';
       api(signup ? '/api/signup' : '/api/login', { method: 'POST', body: { username: u, password: p } })
-        .then(function (d) { state.user = d.user; renderApp(); loadFiles(); loadFolders(); loadFavorites(); loadInvites(); })
+        .then(function (d) { state.user = d.user; renderApp(); loadAll(); })
         .catch(function (e) { err.textContent = e.message; err.style.display = 'block'; });
     }
   }
+  function toast(msg, bad) {
+    var wrap = document.querySelector('.toastwrap');
+    if (!wrap) { wrap = document.createElement('div'); wrap.className = 'toastwrap'; document.body.appendChild(wrap); }
+    var el = document.createElement('div');
+    el.className = 'toastmsg' + (bad ? ' bad' : '');
+    el.textContent = String(msg);
+    wrap.appendChild(el);
+    setTimeout(function () { el.remove(); if (wrap && !wrap.children.length) wrap.remove(); }, 2600);
+  }
   function emptyBox(icon, a, b) { return '<div class="empty">' + icon + '<div>' + a + '</div>' + (b ? '<div style="margin-top:6px">' + b + '</div>' : '') + '</div>'; }
+  function avat(u, cls) {
+    var c = 'avat' + (cls ? ' ' + cls : '');
+    if (u && u.avatar) return '<span class="' + c + '"><img src="' + esc(u.avatar) + '" alt=""></span>';
+    return '<span class="' + c + '">' + ICON.user + '</span>';
+  }
   function renderApp() {
+    var me = state.user;
     app.innerHTML = '<header>' + brand() + '<div class="right">' +
-      '<div class="who">' + ICON.user + '<span>' + esc(state.user.username) + '</span></div>' +
+      '<div class="who">' + avat(me) + '<span>' + esc(me.nick || me.username) + '</span></div>' +
       '<button class="iconbtn" id="menu" title="' + t('account') + '">' + ICON.menu + '<span class="menubadge" id="menubadge"></span></button>' +
       '</div></header>' +
-      '<main><div class="nav" id="nav"></div><div id="view"></div></main>';
+      '<main><div class="searchtop">' + '<span class="sic">' + ICON.search + '</span>' +
+      '<input class="si" id="gsq" placeholder="' + t('search_ph') + '" spellcheck="false" value="' + esc(state.q) + '"></div>' +
+      '<div class="nav" id="nav"></div><div id="view"></div></main>';
     document.getElementById('menu').onclick = openDrawer;
+    var gs = document.getElementById('gsq');
+    gs.oninput = function () {
+      state.q = gs.value.trim();
+      clearTimeout(state.timer);
+      if (!state.q) { state.search = null; renderView(); return; }
+      state.timer = setTimeout(runSearch, 240);
+    };
+    gs.onkeydown = function (e) { if (e.key === 'Enter') { clearTimeout(state.timer); runSearch(); } };
     renderNav();
     renderView();
     loadInvites();
   }
   function renderNav() {
     var nav = document.getElementById('nav'); if (!nav) return;
-    var items = [['files', ICON.file, t('nav_files')], ['search', ICON.search, t('nav_search')], ['folders', ICON.folder, t('nav_folders')], ['fav', ICON.star, t('nav_fav')]];
+    var items = [['files', ICON.file, t('nav_files')], ['folders', ICON.folder, t('nav_folders')]];
     nav.innerHTML = items.map(function (it) {
-      return '<button data-tab="' + it[0] + '" class="' + (state.tab === it[0] ? 'on' : '') + '">' + it[1] + ' ' + it[2] + '</button>';
+      return '<button data-tab="' + it[0] + '" class="' + (state.tab === it[0] && !state.q ? 'on' : '') + '">' + it[1] + ' ' + it[2] + '</button>';
     }).join('');
     Array.prototype.forEach.call(nav.querySelectorAll('button'), function (b) {
       b.onclick = function () {
-        state.tab = b.getAttribute('data-tab'); renderNav(); renderView();
+        state.tab = b.getAttribute('data-tab'); state.q = ''; state.search = null;
+        var gs = document.getElementById('gsq'); if (gs) gs.value = '';
+        renderNav(); renderView();
       };
     });
   }
   function renderView() {
     var v = document.getElementById('view'); if (!v) return;
-    if (state.tab === 'search') return renderSearch();
+    if (state.q) return renderSearch();
     if (state.tab === 'folders') return renderFolders();
-    if (state.tab === 'fav') return renderFav();
     return renderFiles();
+  }
+  function picker(id, opts, cur, ph) {
+    var c = null;
+    for (var i = 0; i < opts.length; i++) if (opts[i].value === cur) c = opts[i];
+    var label = c ? c.label : (ph || t('pick_placeholder'));
+    return '<div class="pick" id="' + id + '"><button type="button" class="pkbtn"><span class="pkl">' +
+      (c && c.icon ? c.icon : '') + '<span class="pklabel">' + esc(label) + '</span></span>' + ICON.chev + '</button>' +
+      '<div class="pklist" style="display:none" data-val="' + esc(cur == null ? '' : cur) + '">' +
+      opts.map(function (o) {
+        return '<button type="button" class="pkitem' + (o.value === cur ? ' on' : '') + '" data-value="' + esc(o.value) + '">' +
+          (o.icon || '') + '<span>' + esc(o.label) + '</span></button>';
+      }).join('') + '</div></div>';
+  }
+  function bindPicker(root, id, onChange) {
+    var wrap = root.querySelector('#' + id); if (!wrap) return;
+    var btn = wrap.querySelector('.pkbtn'), list = wrap.querySelector('.pklist');
+    btn.onclick = function (e) {
+      e.stopPropagation();
+      var open = list.style.display !== 'none';
+      Array.prototype.forEach.call(document.querySelectorAll('.pklist'), function (l) { l.style.display = 'none'; });
+      list.style.display = open ? 'none' : 'block';
+    };
+    Array.prototype.forEach.call(list.querySelectorAll('.pkitem'), function (it) {
+      it.onclick = function (e) {
+        e.stopPropagation();
+        list.setAttribute('data-val', it.getAttribute('data-value'));
+        list.querySelectorAll('.pkitem').forEach(function (x) { x.classList.remove('on'); });
+        it.classList.add('on');
+        var lbl = wrap.querySelector('.pklabel');
+        if (lbl) lbl.textContent = it.textContent.trim();
+        list.style.display = 'none';
+        if (onChange) onChange(it.getAttribute('data-value'));
+      };
+    });
+  }
+  function pickerVal(root, id) { var w = root.querySelector('#' + id); var l = w && w.querySelector('.pklist'); return l ? l.getAttribute('data-val') : ''; }
+  document.addEventListener('click', function () {
+    Array.prototype.forEach.call(document.querySelectorAll('.pklist'), function (l) { l.style.display = 'none'; });
+  });
+  function confirmBox(title, msg, onYes) {
+    var overlay = document.createElement('div'); overlay.className = 'overlay';
+    overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.info + ' ' + esc(title) + '</h3><div class="body">' +
+      '<div class="hint" style="margin:0 0 6px">' + esc(msg) + '</div></div>' +
+      '<div class="foot"><button class="btn ghost" id="cno">' + t('no') + '</button><button class="btn" id="cyes">' + t('yes') + '</button></div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('#cno').onclick = function () { overlay.remove(); };
+    overlay.querySelector('#cyes').onclick = function () { overlay.remove(); onYes(); };
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
   function favBtn(type, id, on) {
     return '<button class="iconbtn fv' + (on ? ' on' : '') + '" data-type="' + type + '" data-id="' + esc(id) + '" title="' + (on ? t('rm_fav') : t('add_fav')) + '">' + (on ? ICON.starfill : ICON.star) + '</button>';
@@ -953,7 +1085,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       var kid = node.getAttribute('data-id'), f = null;
       for (var k = 0; k < list.length; k++) if (list[k].id === kid) f = list[k];
       if (!f) return;
-      var cp = node.querySelector('.cp'); if (cp) cp.onclick = function () { copyText(node.querySelector('.raw input').value); };
+      var cp = node.querySelector('.cp'); if (cp) cp.onclick = function () { copyText(node.querySelector('.raw input').value); toast(t('copy')); };
       var ed = node.querySelector('.ed'); if (ed) ed.onclick = function () { openModal(f.id); };
       var fv = node.querySelector('.fv'); if (fv) fv.onclick = function () { toggleFav('file', f.id, fv); };
       var more = node.querySelector('.more'); if (more) more.onclick = function () { openFileMenu(f); };
@@ -973,11 +1105,12 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     api('/api/favorites', { method: 'POST', body: { type: type, id: id } }).then(function (d) {
       if (btn) { if (d.fav) btn.classList.add('on'); else btn.classList.remove('on'); btn.innerHTML = d.fav ? ICON.starfill : ICON.star; }
       loadFavorites(); loadFiles(); loadFolders();
-    }).catch(function (e) { alert(e.message); });
+    }).catch(function (e) { toast(e.message, true); });
   }
-  function loadFiles() { return api('/api/files').then(function (d) { state.files = d.files || []; if (state.tab === 'files' || state.tab === 'fav') renderView(); }).catch(function () { renderAuth('login'); }); }
-  function loadFolders() { return api('/api/folders').then(function (d) { state.folders = d.folders || []; if (state.tab === 'folders' || state.tab === 'fav') renderView(); }).catch(function () {}); }
-  function loadFavorites() { return api('/api/favorites').then(function (d) { state.fav = { files: d.files || [], folders: d.folders || [] }; if (state.tab === 'fav') renderView(); }).catch(function () {}); }
+  function loadAll() { loadFiles(); loadFolders(); loadFavorites(); loadInvites(); }
+  function loadFiles() { return api('/api/files').then(function (d) { state.files = d.files || []; if (!state.q && state.tab === 'files') renderView(); }).catch(function () { renderAuth('login'); }); }
+  function loadFolders() { return api('/api/folders').then(function (d) { state.folders = d.folders || []; if (!state.q && state.tab === 'folders') renderView(); }).catch(function () {}); }
+  function loadFavorites() { return api('/api/favorites').then(function (d) { state.fav = { files: d.files || [], folders: d.folders || [] }; }).catch(function () {}); }
   function loadInvites() {
     api('/api/invites').then(function (d) {
       state.invites = d.invites || [];
@@ -998,36 +1131,29 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     grid.innerHTML = state.files.map(fileCard).join('');
     bindFiles(grid, state.files);
   }
-  function renderSearch() {
-    var v = document.getElementById('view');
-    v.innerHTML = '<div class="searchwrap"><div class="field" style="margin:0"><label>' + ICON.search + ' ' + t('nav_search') + '</label>' +
-      '<input class="input" id="sq" placeholder="' + t('search_ph') + '" spellcheck="false" value="' + esc(state.q) + '"></div></div><div class="sres" id="sres"></div>';
-    var inp = document.getElementById('sq');
-    inp.oninput = function () {
-      state.q = inp.value.trim();
-      clearTimeout(state.timer);
-      state.timer = setTimeout(doSearch, 240);
-    };
-    if (state.search) renderSearchRes();
-    else document.getElementById('sres').innerHTML = '<div class="hint" style="margin:0">' + t('search_hint') + '</div>';
-  }
-  function doSearch() {
-    if (!state.q) { state.search = null; renderSearch(); return; }
+  function runSearch() {
     var q = state.q;
+    if (!q) { state.search = null; renderView(); return; }
     api('/api/search?q=' + encodeURIComponent(q)).then(function (d) {
       if (state.q !== q) return;
-      state.search = d; renderSearchRes();
-    }).catch(function (e) { var el = document.getElementById('sres'); if (el) el.innerHTML = '<div class="hint">' + esc(e.message) + '</div>'; });
+      state.search = d;
+      if (state.q) renderSearch();
+    }).catch(function (e) { toast(e.message, true); });
   }
-  function renderSearchRes() {
-    var box = document.getElementById('sres'); if (!box) return;
-    var d = state.search || { users: [], files: [], folders: [] };
-    if (!d.users.length && !d.files.length && !d.folders.length) { box.innerHTML = '<div class="hint" style="margin:0">' + t('none') + '</div>'; return; }
+  function renderSearch() {
+    var v = document.getElementById('view');
+    v.innerHTML = '<div class="sres" id="sres"></div>';
+    var box = document.getElementById('sres');
+    var d = state.search;
+    if (!d) { box.innerHTML = '<div class="hint" style="margin:0">' + t('loading') + '</div>'; return; }
+    if (!d.users.length && !d.files.length && !d.folders.length) { box.innerHTML = emptyBox(ICON.search, t('none'), ''); return; }
     var html = '';
     if (d.users.length) {
       html += '<div class="fsec">' + t('res_users') + '</div>';
       html += d.users.map(function (u) {
-        return '<div class="uchip" data-uid="' + esc(u.id) + '" data-name="' + esc(u.username) + '"><div class="un">' + ICON.user + '<span>' + esc(u.username) + '</span></div>' +
+        return '<div class="uchip" data-name="' + esc(u.username) + '">' + avat(u) +
+          '<div class="un"><span>' + esc(u.nick || u.username) + '</span>' +
+          (u.nick ? '<span class="hint" style="margin:0">@' + esc(u.username) + '</span>' : '') + '</div>' +
           '<button class="btn small ' + (u.following ? 'ghost' : '') + ' fol" data-on="' + (u.following ? '1' : '0') + '" data-uid="' + esc(u.id) + '">' + (u.following ? ICON.check + ' ' + t('following') : ICON.userplus + ' ' + t('follow')) + '</button></div>';
       }).join('');
     }
@@ -1057,10 +1183,12 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
           b.setAttribute('data-on', wasOn ? '0' : '1');
           b.className = 'btn small ' + (wasOn ? '' : 'ghost') + ' fol';
           b.innerHTML = wasOn ? ICON.userplus + ' ' + t('follow') : ICON.check + ' ' + t('following');
-        }).catch(function (er) { alert(er.message); });
+          loadFollowing();
+        }).catch(function (er) { toast(er.message, true); });
       };
     });
   }
+  function loadFollowing() { api('/api/following').then(function (d) { state.following = d.following || []; }).catch(function () {}); }
   function renderFolders() {
     var v = document.getElementById('view');
     v.innerHTML = '<div class="bar"><h2>' + t('nav_folders') + '</h2><div class="baract">' +
@@ -1071,16 +1199,33 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     grid.innerHTML = state.folders.map(folderCard).join('');
     bindFolders(grid, state.folders);
   }
-  function renderFav() {
-    var v = document.getElementById('view');
-    var fl = state.fav.files || [], fo = state.fav.folders || [];
-    if (!fl.length && !fo.length) { v.innerHTML = emptyBox(ICON.star, t('no_fav'), ''); return; }
-    var html = '';
-    if (fo.length) html += '<div class="fsec">' + t('res_folders') + '</div><div class="grid" id="ffav"></div>';
-    if (fl.length) html += '<div class="fsec">' + t('res_files') + '</div><div class="grid" id="gfav"></div>';
-    v.innerHTML = html;
-    if (fo.length) { var a = document.getElementById('ffav'); a.innerHTML = fo.map(folderCard).join(''); bindFolders(a, fo); }
-    if (fl.length) { var b = document.getElementById('gfav'); b.innerHTML = fl.map(fileCard).join(''); bindFiles(b, fl); }
+  function renderFavModal() {
+    var overlay = document.createElement('div'); overlay.className = 'overlay';
+    overlay.innerHTML = '<div class="modal"><h3>' + ICON.star + ' ' + t('nav_fav') + '</h3><div class="body" id="favbody">' +
+      '<div class="hint">' + t('loading') + '</div></div>' +
+      '<div class="foot"><button class="btn ghost" id="fvc">' + t('close') + '</button></div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('#fvc').onclick = function () { overlay.remove(); };
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+    api('/api/favorites').then(function (d) {
+      state.fav = { files: d.files || [], folders: d.folders || [] };
+      var fl = state.fav.files, fo = state.fav.folders, body = overlay.querySelector('#favbody');
+      if (!fl.length && !fo.length) { body.innerHTML = '<div class="hint" style="margin:0">' + t('no_fav') + '</div>'; return; }
+      var html = '';
+      if (fo.length) html += '<div class="fsec">' + t('res_folders') + '</div><div class="grid" id="ffav">' + fo.map(folderCard).join('') + '</div>';
+      if (fl.length) html += '<div class="fsec">' + t('res_files') + '</div><div class="grid" id="gfav">' + fl.map(fileCard).join('') + '</div>';
+      body.innerHTML = html;
+      if (fo.length) bindFolders(document.getElementById('ffav'), fo);
+      if (fl.length) bindFiles(document.getElementById('gfav'), fl);
+      Array.prototype.forEach.call(body.querySelectorAll('.fv'), function (b) {
+        var prev = b.onclick;
+        b.onclick = function () {
+          api('/api/favorites', { method: 'POST', body: { type: b.getAttribute('data-type'), id: b.getAttribute('data-id') } })
+            .then(function () { overlay.remove(); renderFavModal(); loadFiles(); loadFolders(); })
+            .catch(function (e) { toast(e.message, true); });
+        };
+      });
+    }).catch(function (e) { toast(e.message, true); });
   }
   function openFolderView(fo) {
     var overlay = document.createElement('div'); overlay.className = 'overlay';
@@ -1096,7 +1241,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     document.body.appendChild(overlay);
     overlay.querySelector('#fx').onclick = function () { overlay.remove(); };
     Array.prototype.forEach.call(overlay.querySelectorAll('.cpf'), function (b) {
-      b.onclick = function () { copyText(loader(b.getAttribute('data-raw'))); };
+      b.onclick = function () { copyText(loader(b.getAttribute('data-raw'))); toast(t('copy')); };
     });
     Array.prototype.forEach.call(overlay.querySelectorAll('.fv'), function (b) {
       b.onclick = function () { toggleFav('file', b.getAttribute('data-id'), b); };
@@ -1111,7 +1256,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<button class="btn ghost" id="m-info">' + ICON.info + ' ' + t('info') + '</button>' +
       '<button class="btn ghost" id="m-fav">' + (f.fav ? ICON.starfill : ICON.star) + ' ' + (f.fav ? t('rm_fav') : t('add_fav')) + '</button>' +
       (owner ? '<button class="btn ghost" id="m-invite">' + ICON.userplus + ' ' + t('invite_others') + '</button>' : '') +
-      (owner ? '<button class="btn ghost" id="m-vis">' + (f.visibility === 'private' ? ICON.eyeoff : ICON.eye) + ' ' + (f.visibility === 'private' ? t('vis_private') : t('vis_public')) + '</button>' : '') +
+      (owner ? '<button class="btn ghost" id="m-vis">' + (f.visibility === 'private' ? ICON.eyeoff : ICON.eye) + ' ' + t('toggle_vis') + ': ' + (f.visibility === 'private' ? t('vis_private') : t('vis_public')) + '</button>' : '') +
       (owner ? '<button class="btn ghost" id="m-move">' + ICON.folder + ' ' + t('add_to_folder') + '</button>' : '') +
       (owner ? '<button class="btn ghost" id="m-del">' + ICON.trash + ' ' + t('delete') + '</button>' : '') +
       '</div><div class="foot"><button class="btn ghost" id="m-close">' + t('close') + '</button></div></div>';
@@ -1119,17 +1264,19 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     overlay.querySelector('#m-close').onclick = function () { overlay.remove(); };
     overlay.querySelector('#m-info').onclick = function () { overlay.remove(); openInfo(f.id); };
     overlay.querySelector('#m-fav').onclick = function () {
-      api('/api/favorites', { method: 'POST', body: { type: 'file', id: f.id } }).then(function () { overlay.remove(); loadFavorites(); loadFiles(); }).catch(function (e) { alert(e.message); });
+      api('/api/favorites', { method: 'POST', body: { type: 'file', id: f.id } }).then(function () { overlay.remove(); loadFavorites(); loadFiles(); }).catch(function (e) { toast(e.message, true); });
     };
     if (overlay.querySelector('#m-invite')) overlay.querySelector('#m-invite').onclick = function () { overlay.remove(); openInvite(f.id); };
     if (overlay.querySelector('#m-vis')) overlay.querySelector('#m-vis').onclick = function () {
       var nv = f.visibility === 'private' ? 'public' : 'private';
-      api('/api/files/' + f.id, { method: 'PUT', body: { visibility: nv } }).then(function () { overlay.remove(); loadFiles(); }).catch(function (e) { alert(e.message); });
+      api('/api/files/' + f.id, { method: 'PUT', body: { visibility: nv } }).then(function () { overlay.remove(); loadFiles(); toast(t('saved')); }).catch(function (e) { toast(e.message, true); });
     };
     if (overlay.querySelector('#m-move')) overlay.querySelector('#m-move').onclick = function () { overlay.remove(); openMove(f); };
     if (overlay.querySelector('#m-del')) overlay.querySelector('#m-del').onclick = function () {
-      if (!confirm(t('delete') + '?')) return;
-      api('/api/files/' + f.id, { method: 'DELETE' }).then(function () { overlay.remove(); loadFiles(); loadFavorites(); }).catch(function (e) { alert(e.message); });
+      overlay.remove();
+      confirmBox(t('confirm_title'), t('delete_confirm'), function () {
+        api('/api/files/' + f.id, { method: 'DELETE' }).then(function () { loadFiles(); loadFavorites(); loadFolders(); }).catch(function (e) { toast(e.message, true); });
+      });
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
@@ -1142,41 +1289,44 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<button class="btn ghost" id="f-open">' + ICON.eye + ' ' + t('open') + '</button>' +
       '<button class="btn ghost" id="f-fav">' + (fo.fav ? ICON.starfill : ICON.star) + ' ' + (fo.fav ? t('rm_fav') : t('add_fav')) + '</button>' +
       (owner ? '<button class="btn ghost" id="f-edit">' + ICON.edit + ' ' + t('pick_files') + '</button>' : '') +
-      (owner ? '<button class="btn ghost" id="f-vis">' + (fo.visibility === 'private' ? ICON.eyeoff : ICON.eye) + ' ' + (fo.visibility === 'private' ? t('vis_private') : t('vis_public')) + '</button>' : '') +
+      (owner ? '<button class="btn ghost" id="f-vis">' + (fo.visibility === 'private' ? ICON.eyeoff : ICON.eye) + ' ' + t('toggle_vis') + ': ' + (fo.visibility === 'private' ? t('vis_private') : t('vis_public')) + '</button>' : '') +
       (owner ? '<button class="btn ghost" id="f-del">' + ICON.trash + ' ' + t('delete') + '</button>' : '') +
       '</div><div class="foot"><button class="btn ghost" id="f-close">' + t('close') + '</button></div></div>';
     document.body.appendChild(overlay);
     overlay.querySelector('#f-close').onclick = function () { overlay.remove(); };
     overlay.querySelector('#f-open').onclick = function () { overlay.remove(); openFolderView(fo); };
     overlay.querySelector('#f-fav').onclick = function () {
-      api('/api/favorites', { method: 'POST', body: { type: 'folder', id: fo.id } }).then(function () { overlay.remove(); loadFavorites(); loadFolders(); }).catch(function (e) { alert(e.message); });
+      api('/api/favorites', { method: 'POST', body: { type: 'folder', id: fo.id } }).then(function () { overlay.remove(); loadFavorites(); loadFolders(); }).catch(function (e) { toast(e.message, true); });
     };
     if (overlay.querySelector('#f-edit')) overlay.querySelector('#f-edit').onclick = function () { overlay.remove(); openFolderModal(fo); };
     if (overlay.querySelector('#f-vis')) overlay.querySelector('#f-vis').onclick = function () {
       var nv = fo.visibility === 'private' ? 'public' : 'private';
-      api('/api/folders/' + fo.id, { method: 'PUT', body: { visibility: nv } }).then(function () { overlay.remove(); loadFolders(); }).catch(function (e) { alert(e.message); });
+      api('/api/folders/' + fo.id, { method: 'PUT', body: { visibility: nv } }).then(function () { overlay.remove(); loadFolders(); toast(t('saved')); }).catch(function (e) { toast(e.message, true); });
     };
     if (overlay.querySelector('#f-del')) overlay.querySelector('#f-del').onclick = function () {
-      if (!confirm(t('delete') + '?')) return;
-      api('/api/folders/' + fo.id, { method: 'DELETE' }).then(function () { overlay.remove(); loadFolders(); loadFiles(); loadFavorites(); }).catch(function (e) { alert(e.message); });
+      overlay.remove();
+      confirmBox(t('confirm_title'), t('delete_confirm'), function () {
+        api('/api/folders/' + fo.id, { method: 'DELETE' }).then(function () { loadFolders(); loadFiles(); loadFavorites(); }).catch(function (e) { toast(e.message, true); });
+      });
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
   function openMove(f) {
+    var opts = [{ value: '', label: t('no_folder') }];
+    state.folders.filter(function (fo) { return fo.role === 'owner'; }).forEach(function (fo) {
+      opts.push({ value: fo.id, label: fo.name, icon: ICON.folder });
+    });
     var overlay = document.createElement('div'); overlay.className = 'overlay';
-    var opts = '<label class="chk"><input type="radio" name="mv" value=""' + (!f.folder ? ' checked' : '') + '> ' + t('no_folder') + '</label>';
-    opts += state.folders.filter(function (fo) { return fo.role === 'owner'; }).map(function (fo) {
-      return '<label class="chk"><input type="radio" name="mv" value="' + esc(fo.id) + '"' + (f.folder === fo.id ? ' checked' : '') + '> ' + ICON.folder + ' ' + esc(fo.name) + '</label>';
-    }).join('');
-    overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.folder + ' ' + t('add_to_folder') + '</h3><div class="body">' + opts + '</div>' +
-      '<div class="foot"><button class="btn ghost" id="mvc">' + t('cancel') + '</button><button class="btn" id="mvs">' + t('move') + '</button></div></div>';
+    overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.folder + ' ' + t('add_to_folder') + '</h3><div class="body">' +
+      '<div class="field" style="margin:0">' + picker('mvpick', opts, f.folder || '', t('no_folder')) + '</div>' +
+      '</div><div class="foot"><button class="btn ghost" id="mvc">' + t('cancel') + '</button><button class="btn" id="mvs">' + t('move') + '</button></div></div>';
     document.body.appendChild(overlay);
+    bindPicker(overlay, 'mvpick');
     overlay.querySelector('#mvc').onclick = function () { overlay.remove(); };
     overlay.querySelector('#mvs').onclick = function () {
-      var sel = overlay.querySelector('input[name="mv"]:checked');
-      var target = sel ? sel.value : '';
+      var target = pickerVal(overlay, 'mvpick');
       api('/api/files/' + f.id, { method: 'PUT', body: { folder: target || null } })
-        .then(function () { overlay.remove(); loadFiles(); loadFolders(); }).catch(function (e) { alert(e.message); });
+        .then(function () { overlay.remove(); loadFiles(); loadFolders(); toast(t('saved')); }).catch(function (e) { toast(e.message, true); });
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
@@ -1184,13 +1334,17 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     var editing = !!fo;
     var sel = [];
     if (editing && fo.files) fo.files.forEach(function (f) { sel.push(f.id); });
+    var visOpts = [{ value: 'public', label: t('vis_public'), icon: ICON.eye }, { value: 'private', label: t('vis_private'), icon: ICON.eyeoff }];
     var overlay = document.createElement('div'); overlay.className = 'overlay';
     overlay.innerHTML = '<div class="modal"><h3>' + (editing ? ICON.edit + ' ' + t('pick_files') : ICON.folder + ' ' + t('new_folder')) + '</h3><div class="body">' +
       '<div class="field"><label>' + ICON.folder + ' ' + t('folder_name') + '</label><input class="input" id="foname" placeholder="myfolder" spellcheck="false" value="' + (editing ? esc(fo.name) : '') + '"></div>' +
-      '<div class="field"><label>' + ICON.eye + ' ' + t('visibility') + '</label><select class="input" id="fovis"><option value="public"' + (editing && fo.visibility === 'private' ? '' : ' selected') + '>' + t('vis_public') + '</option><option value="private"' + (editing && fo.visibility === 'private' ? ' selected' : '') + '>' + t('vis_private') + '</option></select></div>' +
+      '<div class="field"><label>' + ICON.eye + ' ' + t('visibility') + '</label>' + picker('fovispick', visOpts, editing ? fo.visibility : 'public', t('pick_placeholder')) + '<div class="hint" id="fovishint">' + (editing && fo.visibility === 'private' ? t('private_hint') : t('public_hint')) + '</div></div>' +
       '<div class="field"><label>' + ICON.file + ' ' + t('select_files') + '</label><div id="fofiles"><div class="hint">' + t('loading') + '</div></div></div>' +
       '</div><div class="foot"><button class="btn ghost" id="foc">' + t('cancel') + '</button><button class="btn" id="fos">' + (editing ? t('save') : t('create')) + '</button></div></div>';
     document.body.appendChild(overlay);
+    bindPicker(overlay, 'fovispick', function (v) {
+      var h = overlay.querySelector('#fovishint'); if (h) h.textContent = v === 'private' ? t('private_hint') : t('public_hint');
+    });
     var nameEl = overlay.querySelector('#foname');
     api('/api/files').then(function (d) {
       var my = (d.files || []).filter(function (f) { return f.role === 'owner'; });
@@ -1206,21 +1360,22 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     overlay.querySelector('#fos').onclick = function () {
       var picks = [];
       Array.prototype.forEach.call(overlay.querySelectorAll('#fofiles input:checked'), function (c) { picks.push(c.value); });
-      var body = { name: nameEl.value.trim(), files: picks, visibility: overlay.querySelector('#fovis').value };
+      var body = { name: nameEl.value.trim(), files: picks, visibility: pickerVal(overlay, 'fovispick') || 'public' };
       api(editing ? '/api/folders/' + fo.id : '/api/folders', { method: editing ? 'PUT' : 'POST', body: body })
-        .then(function () { overlay.remove(); loadFolders(); loadFiles(); }).catch(function (e) { alert(e.message); });
+        .then(function () { overlay.remove(); loadFolders(); loadFiles(); toast(t('saved')); }).catch(function (e) { toast(e.message, true); });
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
   function openModal(id) {
     var editing = !!id;
+    var visOpts = [{ value: 'public', label: t('vis_public'), icon: ICON.eye }, { value: 'private', label: t('vis_private'), icon: ICON.eyeoff }];
     var overlay = document.createElement('div'); overlay.className = 'overlay';
     overlay.innerHTML = '<div class="modal">' +
       '<h3>' + (editing ? ICON.edit + ' ' + t('edit_file') : ICON.plus + ' ' + t('create_file')) + '</h3>' +
       '<div class="body">' +
       '<div class="field"><label>' + ICON.file + ' ' + t('file_name') + '</label><input class="input" id="fname" placeholder="myscript" spellcheck="false"></div>' +
-      '<div class="field"><label>' + ICON.eye + ' ' + t('visibility') + '</label><select class="input" id="fvis"><option value="public">' + t('vis_public') + '</option><option value="private">' + t('vis_private') + '</option></select></div>' +
-      '<div class="field"><label>' + ICON.folder + ' ' + t('add_to_folder') + '</label><select class="input" id="ffolder"><option value="">' + t('no_folder') + '</option></select></div>' +
+      '<div class="field"><label>' + ICON.eye + ' ' + t('visibility') + '</label>' + picker('fvispick', visOpts, 'public', t('pick_placeholder')) + '</div>' +
+      '<div class="field"><label>' + ICON.folder + ' ' + t('add_to_folder') + '</label>' + picker('ffolderpick', [{ value: '', label: t('no_folder') }], '', t('no_folder')) + '</div>' +
       '<div class="field"><label>' + ICON.code + ' ' + t('code') + '</label><textarea class="input" id="fcode" placeholder="print(&quot;hello&quot;)"></textarea></div>' +
       '<div class="field"><label>' + ICON.file + ' ' + t('upload_file') + '</label>' +
       '<button class="btn ghost uploadbtn" id="fpick" type="button">' + ICON.file + ' ' + t('choose_file') + '</button>' +
@@ -1230,14 +1385,17 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<div class="foot"><button class="btn ghost" id="cancel">' + t('cancel') + '</button><button class="btn" id="save">' + (editing ? t('save') : t('create')) + '</button></div></div>';
     document.body.appendChild(overlay);
     var nameEl = overlay.querySelector('#fname'), codeEl = overlay.querySelector('#fcode');
-    var visEl = overlay.querySelector('#fvis'), foEl = overlay.querySelector('#ffolder');
-    api('/api/folders').then(function (d) {
-      (d.folders || []).filter(function (x) { return x.role === 'owner'; }).forEach(function (fo) {
-        var o = document.createElement('option');
-        o.value = fo.id; o.textContent = fo.name;
-        foEl.appendChild(o);
-      });
-    }).catch(function () {});
+    bindPicker(overlay, 'fvispick');
+    bindPicker(overlay, 'ffolderpick');
+    var foOpts = [{ value: '', label: t('no_folder') }];
+    state.folders.filter(function (x) { return x.role === 'owner'; }).forEach(function (fo) { foOpts.push({ value: fo.id, label: fo.name, icon: ICON.folder }); });
+    var fw = overlay.querySelector('#ffolderpick .pklist');
+    if (fw) {
+      fw.innerHTML = foOpts.map(function (o) {
+        return '<button type="button" class="pkitem" data-value="' + esc(o.value) + '">' + (o.icon || '') + '<span>' + esc(o.label) + '</span></button>';
+      }).join('');
+      bindPicker(overlay, 'ffolderpick');
+    }
     overlay.querySelector('#fpick').onclick = function () { overlay.querySelector('#ffile').click(); };
     overlay.querySelector('#ffile').addEventListener('change', function (e) {
       var file = e.target.files[0]; if (!file) return;
@@ -1248,16 +1406,18 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     });
     if (editing) api('/api/files/' + id).then(function (d) {
       nameEl.value = d.name; codeEl.value = d.code;
-      visEl.value = d.visibility || 'public';
-      if (d.folder) foEl.value = d.folder;
-    }).catch(function (e) { alert(e.message); overlay.remove(); });
+      var vl = overlay.querySelector('#fvispick .pklist');
+      if (vl) { vl.setAttribute('data-val', d.visibility || 'public'); var lbl = overlay.querySelector('#fvispick .pklabel'); if (lbl) lbl.textContent = d.visibility === 'private' ? t('vis_private') : t('vis_public'); }
+      var fl = overlay.querySelector('#ffolderpick .pklist');
+      if (fl) { fl.setAttribute('data-val', d.folder || ''); var lb2 = overlay.querySelector('#ffolderpick .pklabel'); if (lb2) { var found = foOpts.filter(function (o) { return o.value === (d.folder || ''); })[0]; lb2.textContent = found ? found.label : t('no_folder'); } }
+    }).catch(function (e) { toast(e.message, true); overlay.remove(); });
     else nameEl.focus();
     overlay.querySelector('#cancel').onclick = function () { overlay.remove(); };
     overlay.querySelector('#save').onclick = function () {
-      var body = { name: nameEl.value.trim(), code: codeEl.value, visibility: visEl.value, folder: foEl.value || null };
+      var body = { name: nameEl.value.trim(), code: codeEl.value, visibility: pickerVal(overlay, 'fvispick') || 'public', folder: pickerVal(overlay, 'ffolderpick') || null };
       api(editing ? '/api/files/' + id : '/api/files', { method: editing ? 'PUT' : 'POST', body: body })
-        .then(function () { overlay.remove(); loadFiles(); loadFolders(); })
-        .catch(function (e) { alert(e.message); });
+        .then(function () { overlay.remove(); loadFiles(); loadFolders(); toast(t('saved')); })
+        .catch(function (e) { toast(e.message, true); });
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
@@ -1285,10 +1445,13 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
     api('/api/users/' + encodeURIComponent(name)).then(function (d) {
       var body = overlay.querySelector('#pfbody');
-      var head = '<div class="pfhead">' + ICON.user + '<div><div class="pn">' + esc(d.user.username) + '</div>' +
-        '<div class="hint" style="margin:0">' + d.followers + ' ' + t('followers') + ' · ' + d.followingCount + ' ' + t('following_n') + '</div></div></div>';
-      var fol = d.isSelf ? '' : '<button class="btn ' + (d.following ? 'ghost' : '') + ' folp" data-uid="' + esc(d.user.id) + '">' + (d.following ? ICON.check + ' ' + t('following') : ICON.userplus + ' ' + t('follow')) + '</button>';
-      var html = head + fol;
+      var head = '<div class="pfhead">' + avat(d.user, 'big') + '<div><div class="pn">' + esc(d.user.nick || d.user.username) + '</div>' +
+        (d.user.nick ? '<div class="hint" style="margin:0">@' + esc(d.user.username) + '</div>' : '') +
+        '<div class="hint" style="margin:0">' + d.followers + ' ' + t('followers_t') + ' · ' + d.followingCount + ' ' + t('following_t') + '</div></div></div>';
+      var act = '';
+      if (d.isSelf) act = '<button class="btn" id="pfedit">' + ICON.edit + ' ' + t('edit_profile') + '</button>';
+      else act = '<button class="btn ' + (d.following ? 'ghost' : '') + ' folp" data-uid="' + esc(d.user.id) + '">' + (d.following ? ICON.check + ' ' + t('following') : ICON.userplus + ' ' + t('follow')) + '</button>';
+      var html = head + act;
       if (d.files.length) html += '<div class="fsec">' + t('res_files') + '</div><div class="grid" id="pfiles">' + d.files.map(fileCard).join('') + '</div>';
       if (d.folders.length) html += '<div class="fsec">' + t('res_folders') + '</div><div class="grid" id="pfol">' + d.folders.map(folderCard).join('') + '</div>';
       if (!d.files.length && !d.folders.length) html += '<div class="hint">' + t('none') + '</div>';
@@ -1297,9 +1460,75 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       if (d.folders.length) bindFolders(document.getElementById('pfol'), d.folders);
       var fb = body.querySelector('.folp');
       if (fb) fb.onclick = function () {
-        api('/api/follow/' + fb.getAttribute('data-uid'), { method: d.following ? 'DELETE' : 'POST' }).then(function () { overlay.remove(); openProfile(name); }).catch(function (e) { alert(e.message); });
+        api('/api/follow/' + fb.getAttribute('data-uid'), { method: d.following ? 'DELETE' : 'POST' }).then(function () { overlay.remove(); openProfile(name); loadFollowing(); }).catch(function (e) { toast(e.message, true); });
       };
+      var pe = body.querySelector('#pfedit');
+      if (pe) pe.onclick = function () { overlay.remove(); openEditProfile(); };
     }).catch(function (e) { overlay.querySelector('#pfbody').textContent = e.message; });
+  }
+  function openEditProfile() {
+    var me = state.user || {};
+    var overlay = document.createElement('div'); overlay.className = 'overlay';
+    overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.user + ' ' + t('edit_profile') + '</h3><div class="body">' +
+      '<div class="avpick"><span id="avprev">' + avat(me, 'big') + '</span>' +
+      '<div style="display:flex;flex-direction:column;gap:7px;flex:1"><button class="btn ghost" id="avpick" type="button">' + ICON.camera + ' ' + t('change_photo') + '</button>' +
+      '<button class="btn ghost" id="avrm" type="button">' + ICON.x + ' ' + t('remove_photo') + '</button></div></div>' +
+      '<input type="file" id="avfile" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none">' +
+      '<div class="field" style="margin-top:14px"><label>' + ICON.user + ' ' + t('nickname') + '</label><input class="input" id="pfnick" maxlength="32" placeholder="' + t('nickname') + '" spellcheck="false" value="' + esc(me.nick || '') + '"></div>' +
+      '<div class="hint">@' + esc(me.username || '') + '</div>' +
+      '</div><div class="foot"><button class="btn ghost" id="pfcancel">' + t('cancel') + '</button><button class="btn" id="pfsave">' + t('save') + '</button></div></div>';
+    document.body.appendChild(overlay);
+    var pending = me.avatar || '';
+    var prev = overlay.querySelector('#avprev');
+    function paintPreview() { prev.innerHTML = avat({ avatar: pending }, 'big'); }
+    overlay.querySelector('#avpick').onclick = function () { overlay.querySelector('#avfile').click(); };
+    overlay.querySelector('#avfile').addEventListener('change', function (e) {
+      var file = e.target.files[0]; if (!file) return;
+      if (file.size > 300 * 1024) { toast(t('change_photo') + ': 300KB', true); return; }
+      var reader = new FileReader();
+      reader.onload = function () { pending = String(reader.result || ''); paintPreview(); };
+      reader.readAsDataURL(file);
+    });
+    overlay.querySelector('#avrm').onclick = function () { pending = ''; paintPreview(); };
+    overlay.querySelector('#pfcancel').onclick = function () { overlay.remove(); };
+    overlay.querySelector('#pfsave').onclick = function () {
+      var nick = overlay.querySelector('#pfnick').value.trim();
+      api('/api/profile', { method: 'PUT', body: { nick: nick, avatar: pending } }).then(function (d) {
+        state.user = d.user;
+        overlay.remove();
+        if (document.getElementById('menu')) {
+          var who = document.querySelector('header .who');
+          if (who) who.innerHTML = avat(state.user) + '<span>' + esc(state.user.nick || state.user.username) + '</span>';
+        }
+        toast(t('profile_saved'));
+      }).catch(function (e) { toast(e.message, true); });
+    };
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+  }
+  function openFollowing() {
+    var overlay = document.createElement('div'); overlay.className = 'overlay';
+    overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.userplus + ' ' + t('following_t') + '</h3><div class="body" id="folbody"><div class="hint">' + t('loading') + '</div></div><div class="foot"><button class="btn ghost" id="folc">' + t('close') + '</button></div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('#folc').onclick = function () { overlay.remove(); };
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+    api('/api/following').then(function (d) {
+      var list = d.following || [], body = overlay.querySelector('#folbody');
+      if (!list.length) { body.innerHTML = '<div class="hint" style="margin:0">' + t('none') + '</div>'; return; }
+      body.innerHTML = list.map(function (u) {
+        return '<div class="uchip" data-name="' + esc(u.username) + '">' + avat(u) +
+          '<div class="un"><span>' + esc(u.nick || u.username) + '</span></div>' +
+          '<button class="btn small ghost unfol" data-uid="' + esc(u.id) + '">' + ICON.x + ' ' + t('unfollow') + '</button></div>';
+      }).join('');
+      Array.prototype.forEach.call(body.querySelectorAll('.uchip'), function (chip) {
+        chip.onclick = function (e) { if (e.target.closest && e.target.closest('.unfol')) return; overlay.remove(); openProfile(chip.getAttribute('data-name')); };
+      });
+      Array.prototype.forEach.call(body.querySelectorAll('.unfol'), function (b) {
+        b.onclick = function (e) {
+          e.stopPropagation();
+          api('/api/follow/' + b.getAttribute('data-uid'), { method: 'DELETE' }).then(function () { overlay.remove(); openFollowing(); }).catch(function (er) { toast(er.message, true); });
+        };
+      });
+    }).catch(function (e) { overlay.querySelector('#folbody').textContent = e.message; });
   }
   function openInvite(id) {
     var overlay = document.createElement('div'); overlay.className = 'overlay';
@@ -1312,8 +1541,8 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     overlay.querySelector('#ivcancel').onclick = function () { overlay.remove(); };
     overlay.querySelector('#ivsend').onclick = function () {
       api('/api/files/' + id + '/invite', { method: 'POST', body: { username: inp.value.trim() } })
-        .then(function () { overlay.remove(); alert(t('invited_sent')); })
-        .catch(function (e) { alert(e.message); });
+        .then(function () { overlay.remove(); toast(t('invited_sent')); })
+        .catch(function (e) { toast(e.message, true); });
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
@@ -1342,14 +1571,19 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   function actInvite(fileId, action, overlay) {
     api('/api/invites/' + fileId + '/' + action, { method: 'POST' })
       .then(function () { loadInvites(); loadFiles(); renderInvites(overlay); })
-      .catch(function (e) { alert(e.message); });
+      .catch(function (e) { toast(e.message, true); });
   }
   function openDrawer() {
+    var me = state.user || {};
     var overlay = document.createElement('div'); overlay.className = 'drawer-overlay';
     overlay.innerHTML = '<aside class="drawer">' +
-      '<div class="dhead"><div class="logo"><img src="https://files.catbox.moe/okwlyx.png" alt=""></div><div><div class="dname">สกัด HUB</div><div class="duser">' + esc(state.user.username) + '</div></div></div>' +
+      '<div class="dhead"><div class="logo"><img src="https://files.catbox.moe/okwlyx.png" alt=""></div><div><div class="dname">สกัด HUB</div><div class="duser">' + esc(me.username) + '</div></div></div>' +
+      '<div class="dprof">' + avat(me, 'big') + '<div><div class="dpn">' + esc(me.nick || me.username) + '</div><div class="dpu">@' + esc(me.username) + '</div></div></div>' +
+      '<button class="ditem" id="d-prof">' + ICON.user + ' ' + t('view_profile') + '</button>' +
+      '<button class="ditem" id="d-edit">' + ICON.edit + ' ' + t('edit_profile') + '</button>' +
+      '<button class="ditem" id="d-fav">' + ICON.star + ' ' + t('nav_fav') + '</button>' +
+      '<button class="ditem" id="d-fol">' + ICON.userplus + ' ' + t('following_t') + '</button>' +
       '<button class="ditem" id="d-inv">' + ICON.userplus + ' ' + t('invites') + '<span class="dbadge" id="dbadge">' + state.invites.length + '</span></button>' +
-      '<button class="ditem" id="d-me">' + ICON.user + ' ' + t('view_profile') + '</button>' +
       '<div class="ditem dlang"><span>' + t('language') + '</span><div class="langs">' +
       '<button data-lang="th" class="' + (LANG === 'th' ? 'on' : '') + '">ไทย</button>' +
       '<button data-lang="en" class="' + (LANG === 'en' ? 'on' : '') + '">EN</button>' +
@@ -1359,8 +1593,11 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '</aside>';
     document.body.appendChild(overlay);
     var db = overlay.querySelector('#dbadge'); if (db && !state.invites.length) db.style.display = 'none';
+    overlay.querySelector('#d-prof').onclick = function () { overlay.remove(); openProfile(state.user.username); };
+    overlay.querySelector('#d-edit').onclick = function () { overlay.remove(); openEditProfile(); };
+    overlay.querySelector('#d-fav').onclick = function () { overlay.remove(); renderFavModal(); };
+    overlay.querySelector('#d-fol').onclick = function () { overlay.remove(); openFollowing(); };
     overlay.querySelector('#d-inv').onclick = function () { overlay.remove(); openInvites(); };
-    overlay.querySelector('#d-me').onclick = function () { overlay.remove(); openProfile(state.user.username); };
     overlay.querySelector('#d-out').onclick = function () {
       api('/api/logout', { method: 'POST' }).then(function () { overlay.remove(); state.user = null; renderAuth('login'); });
     };
@@ -1372,7 +1609,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   function boot() {
     api('/api/me').then(function (d) {
       state.user = d.user;
-      if (state.user) { renderApp(); loadFiles(); loadFolders(); loadFavorites(); loadInvites(); }
+      if (state.user) { renderApp(); loadAll(); loadFollowing(); }
       else renderAuth('login');
     }).catch(function () { renderAuth('login'); });
   }
