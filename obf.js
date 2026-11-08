@@ -206,9 +206,9 @@ const STMT_KEYWORDS = {
 const LEVELS = {
   1: { layers: 1, junk: 1,   decoys: 6,   junkMul: 1,   strings: true, numbers: true, rename: true },
   2: { layers: 2, junk: 2.5, decoys: 14,  junkMul: 2.5, strings: true, numbers: true, rename: true },
-  3: { layers: 2, junk: 5,   decoys: 40,  junkMul: 5,   strings: true, numbers: true, rename: true },
+  3: { layers: 3, junk: 5,   decoys: 40,  junkMul: 5,   strings: true, numbers: true, rename: true },
   4: { layers: 3, junk: 7.5, decoys: 80,  junkMul: 7.5, strings: true, numbers: true, rename: true },
-  5: { layers: 3, junk: 10,  decoys: 140, junkMul: 10,  strings: true, numbers: true, rename: true }
+  5: { layers: 4, junk: 10,  decoys: 140, junkMul: 10,  strings: true, numbers: true, rename: true }
 };
 
 function luaObfuscate(source, options) {
@@ -583,17 +583,30 @@ function luaObfuscate(source, options) {
   let result = pre + body;
 
   if (o.wrap) {
-    const layers = Math.max(1, Math.min(3, Number(o.layers) || 1));
-    for (let li = 0; li < layers; li++) result = packBlob(result, rnd, o.hideErrors, rid);
+    const layers = Math.max(1, Math.min(8, Number(o.layers) || 1));
+    let prev = -1;
+    for (let li = 0; li < layers; li++) {
+      const packed = packBlob(result, rnd, o.hideErrors, rid, prev);
+      result = packed.code;
+      prev = packed.scheme;
+    }
   }
 
   const mul = Math.max(0, Number(o.junkMul) || 0);
   const minDecoys = Math.max(0, Math.min(400, Number(o.decoys) || 0));
   if (mul > 0 || minDecoys > 0) {
-    const targetChars = Math.min(1600000, Math.floor(result.length * mul));
+    const baseLen = String(source).length;
+    const targetChars = Math.min(900000, Math.floor(baseLen * mul));
     const built = buildJunkToSize(rnd, rid, targetChars, minDecoys);
     if (built.code) {
-      result = built.code + ' return (function() ' + result + ' end)()';
+      const st = Math.floor(rnd() * 4);
+      const rn = rid();
+      let wrap;
+      if (st === 0) wrap = ' return (function() ' + result + ' end)()';
+      else if (st === 1) wrap = ' local ' + rn + '=function() ' + result + ' end return ' + rn + '()';
+      else if (st === 2) wrap = ' local ' + rn + '=function() ' + result + ' end if ' + rn + ' then return ' + rn + '() end';
+      else wrap = ' local ' + rn + '=function() ' + result + ' end return ' + rn + ' and ' + rn + '()';
+      result = built.code + wrap;
     }
     var decoyCount = built.count;
     var junkChars = built.code.length;
@@ -722,116 +735,203 @@ function buildRemotePre(rnd, rid, url, keyPair, sfn) {
   return parts.join(' ') + ' ';
 }
 
-const B62 = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
-function packBlob(src, rnd, hideErrors, rid) {
+function numLit(v, rnd) {
+  const a = 1 + Math.floor(rnd() * 4000);
+  const style = Math.floor(rnd() * 3);
+  if (style === 0) return '(' + (v + a) + '-' + a + ')';
+  if (style === 1) return '(' + (v * 2 + a) + '-' + (v + a) + ')';
+  const b = 2 + Math.floor(rnd() * 90);
+  return 'math.floor((' + (v * b) + '/' + b + '))';
+}
+
+const B62 = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+const B62N = '(' + B62.split('').map(function (c) { return c.charCodeAt(0); }).join(',') + ')';
+
+function chunk(src, rnd, count) {
   const bytes = toByteString(src);
   const n = bytes.length;
-
-  const chunkCount = Math.max(2, Math.min(6, 2 + Math.floor(rnd() * 4)));
+  const cc = Math.max(2, Math.min(count, n));
   const lens = [];
   let remain = n;
-  for (let c = 0; c < chunkCount - 1; c++) {
-    const slots = chunkCount - c;
+  for (let c = 0; c < cc - 1; c++) {
+    const slots = cc - c;
     const maxLen = Math.max(1, Math.floor(remain / slots) * 2);
     const len = Math.max(1, Math.min(remain - (slots - 1), 1 + Math.floor(rnd() * maxLen)));
     lens.push(len);
     remain -= len;
   }
   lens.push(Math.max(0, remain));
-
-  const chunks = [];
+  const parts = [];
   let off = 0;
-  for (let c = 0; c < chunkCount; c++) {
-    const len = lens[c];
-    const k1 = 1 + Math.floor(rnd() * 251);
-    const k2 = Math.floor(rnd() * 256);
-    const arr = [];
-    for (let i = 0; i < len; i++) {
-      const b = bytes.charCodeAt(off + i) & 255;
-      arr.push((b + (((i + 1) * k1 + k2) % 256)) % 256);
-    }
-    off += len;
-    if (arr.length % 2) arr.push(0);
-    let blob = '';
-    for (let i = 0; i < arr.length; i += 2) {
-      const v = arr[i] * 256 + arr[i + 1];
-      blob += B62[Math.floor(v / 3844)] + B62[Math.floor((v % 3844) / 62)] + B62[v % 62];
-    }
-    chunks.push({ k1: k1, k2: k2, len: len, blob: blob });
+  for (let c = 0; c < cc; c++) {
+    parts.push(bytes.slice(off, off + lens[c]));
+    off += lens[c];
   }
+  return { parts: parts, lens: lens, n: n, bytes: bytes };
+}
 
+function shuffleOrder(rnd, count) {
   const order = [];
-  for (let i = 0; i < chunkCount; i++) order.push(i);
+  for (let i = 0; i < count; i++) order.push(i);
   for (let i = order.length - 1; i > 0; i--) {
     const j = Math.floor(rnd() * (i + 1));
     const t = order[i]; order[i] = order[j]; order[j] = t;
   }
+  return order;
+}
 
-  let chk = n % 65521;
-  for (let i = 0; i < n; i++) chk = (chk + (bytes.charCodeAt(i) & 255)) % 65521;
-  const jx = Math.floor(rnd() * 9000) + 1000, jy = Math.floor(rnd() * 9000) + 1000;
-
-  const A = rid(), M = rid(), BL = rid(), LEN = rid(), K1 = rid(), K2 = rid();
-  const ORD = rid(), OUT = rid(), P = rid(), I = rid(), C = rid();
-  const V = rid(), HX = rid(), B1 = rid(), B2 = rid(), Q = rid(), N = rid(), S = rid();
-  const LD = rid(), FN = rid(), ER = rid(), OK = rid(), RES = rid();
-
-  const blobTable = order.map(function (o) { return '"' + chunks[o].blob + '"'; }).join(',');
-  const lenTable = order.map(function (o) { return chunks[o].len; }).join(',');
-  const k1Table = order.map(function (o) { return chunks[o].k1; }).join(',');
-  const k2Table = order.map(function (o) { return chunks[o].k2; }).join(',');
-
-  const parts = [];
-  const abcNums = B62.split('').map(function (c) { return c.charCodeAt(0); }).join(',');
-  parts.push('local ' + A + '=string.char(' + abcNums + ')');
-  parts.push('local ' + M + '={}');
-  parts.push('for ' + I + '=1,#' + A + ' do ' + M + '[' + A + ':sub(' + I + ',' + I + ')]=' + I + '-1 end');
-  parts.push('local ' + BL + '={' + blobTable + '}');
-  parts.push('local ' + LEN + '={' + lenTable + '}');
-  parts.push('local ' + K1 + '={' + k1Table + '}');
-  parts.push('local ' + K2 + '={' + k2Table + '}');
-  parts.push('local ' + ORD + '={' + order.map(function (v) { return v + 1; }).join(',') + '}');
-  parts.push('local ' + OUT + '={}');
-  parts.push('for ' + C + '=1,#' + BL + ' do');
-  parts.push('local ' + V + '=' + BL + '[' + C + ']');
-  parts.push('local ' + I + '=1');
-  parts.push('local ' + P + '=0');
-  parts.push('local ' + Q + '={}');
-  parts.push('while ' + I + '<=#' + V + ' do');
-  const ch0 = M + '[' + V + ':sub(' + I + ',' + I + ')]';
-  const ch1 = M + '[' + V + ':sub(' + I + '+1,' + I + '+1)]';
-  const ch2 = M + '[' + V + ':sub(' + I + '+2,' + I + '+2)]';
-  parts.push('local ' + HX + '=' + ch0 + '*3844+' + ch1 + '*62+' + ch2);
-  parts.push('local ' + B1 + '=math.floor(' + HX + '/256)');
-  parts.push('local ' + B2 + '=' + HX + '%256');
-  parts.push(P + '=' + P + '+1 ' + Q + '[' + P + ']=(' + B1 + '-((' + P + '*' + K1 + '[' + C + ']+' + K2 + '[' + C + '])%256))%256');
-  parts.push(P + '=' + P + '+1 ' + Q + '[' + P + ']=(' + B2 + '-((' + P + '*' + K1 + '[' + C + ']+' + K2 + '[' + C + '])%256))%256');
-  parts.push(I + '=' + I + '+3 end');
-  parts.push('local ' + N + '={}');
-  parts.push('for ' + I + '=1,' + LEN + '[' + C + '] do ' + N + '[' + I + ']=string.char(' + Q + '[' + I + ']) end');
-  parts.push(OUT + '[' + ORD + '[' + C + ']]=table.concat(' + N + ')');
-  parts.push('end');
-  parts.push('local ' + S + '=table.concat(' + OUT + ')');
-  parts.push('if #' + S + '~=' + n + ' then return end');
-  parts.push('local ' + Q + '=' + (n % 65521) + ' for ' + I + '=1,#' + S + ' do ' + Q + '=(' + Q + '+string.byte(' + S + ',' + I + '))%65521 end');
-  parts.push('if ' + Q + '~=' + chk + ' then return end');
-  parts.push('if (' + jx + '-' + jy + ')~=' + (jx - jy) + ' then return end');
-  parts.push('local ' + LD + '=nil');
-  parts.push('local ' + LD + 'x=getfenv and getfenv() or _ENV');
-  parts.push(LD + '=' + LD + 'x[string.char(108,111,97,100,115,116,114,105,110,103)] or ' + LD + 'x[string.char(108,111,97,100)]');
+function wrapTail(parts, rnd, hideErrors, LD, S, FN, ER, OK, RES) {
+  const style = Math.floor(rnd() * 4);
   if (hideErrors) {
     parts.push('local ' + FN + ',' + ER + '=pcall(function() return ' + LD + '(' + S + ',"@") end)');
     parts.push('if not ' + FN + ' or not ' + ER + ' then return end');
     parts.push('local ' + OK + ',' + RES + '=pcall(' + ER + ')');
     parts.push('if not ' + OK + ' then return end');
     parts.push('return ' + RES);
+  } else if (style === 0) {
+    parts.push('return (function() local ' + FN + '=' + LD + '(' + S + ') return ' + FN + ' and ' + FN + '() end)()');
+  } else if (style === 1) {
+    parts.push('local ' + FN + '=' + LD + '(' + S + ')');
+    parts.push('if ' + FN + ' then return ' + FN + '() end');
+  } else if (style === 2) {
+    parts.push('local ' + FN + '=' + LD + '(' + S + ')');
+    parts.push(ER + '=' + FN + '() if ' + FN + ' then return ' + ER + ' end');
   } else {
-    parts.push('local ' + FN + ',' + ER + '=' + LD + '(' + S + ',"@")');
-    parts.push('if not ' + FN + ' then return end');
-    parts.push('return ' + FN + '()');
+    parts.push('local ' + FN + '=' + LD + '(' + S + ')');
+    parts.push('return ' + FN + ' and ' + FN + '()');
   }
-  return parts.join(' ');
+}
+
+function loaderNames(rid) {
+  return {
+    A: rid(), M: rid(), BL: rid(), LEN: rid(), K1: rid(), K2: rid(), K3: rid(),
+    ORD: rid(), OUT: rid(), P: rid(), I: rid(), C: rid(), V: rid(), HX: rid(),
+    B1: rid(), B2: rid(), Q: rid(), N: rid(), S: rid(), LD: rid(), FN: rid(),
+    ER: rid(), OK: rid(), RES: rid(), T: rid(), D: rid(), G: rid()
+  };
+}
+
+function schemeA(src, rnd, hideErrors, rid) {
+  const ch = chunk(src, rnd, 2 + Math.floor(rnd() * 5));
+  const order = shuffleOrder(rnd, ch.parts.length);
+  const names = loaderNames(rid);
+  const recs = order.map(function (orig) {
+    const bytes = ch.parts[orig];
+    const k1 = 1 + Math.floor(rnd() * 251);
+    const k2 = Math.floor(rnd() * 256);
+    const k3 = Math.floor(rnd() * 256);
+    const arr = [];
+    for (let i = 0; i < bytes.length; i++) {
+      const b = bytes.charCodeAt(i) & 255;
+      arr.push((b + (((i + 1) * k1 + k2) % 256)) % 256);
+    }
+    if (arr.length % 2) arr.push(0);
+    let blob = '';
+    for (let i = 0; i < arr.length; i += 2) {
+      const v = arr[i] * 256 + arr[i + 1];
+      blob += B62[Math.floor(v / 3844)] + B62[Math.floor((v % 3844) / 62)] + B62[v % 62];
+    }
+    return { blob: blob, len: bytes.length, k1: k1, k2: k2, k3: k3 };
+  });
+  const p = [];
+  const nm = names;
+  p.push('local ' + nm.A + '=string.char' + B62N);
+  p.push('local ' + nm.M + '={} for ' + nm.I + '=1,#' + nm.A + ' do ' + nm.M + '[' + nm.A + ':sub(' + nm.I + ',' + nm.I + ')]=' + nm.I + '-1 end');
+  p.push('local ' + nm.BL + '={' + recs.map(function (r) { return '"' + r.blob + '"'; }).join(',') + '}');
+  p.push('local ' + nm.LEN + '={' + recs.map(function (r) { return r.len; }).join(',') + '}');
+  p.push('local ' + nm.K1 + '={' + recs.map(function (r) { return r.k1; }).join(',') + '}');
+  p.push('local ' + nm.K2 + '={' + recs.map(function (r) { return r.k2; }).join(',') + '}');
+  p.push('local ' + nm.K3 + '={' + recs.map(function (r) { return r.k3; }).join(',') + '}');
+  p.push('local ' + nm.ORD + '={' + order.map(function (v) { return v + 1; }).join(',') + '}');
+  p.push('local ' + nm.OUT + '={}');
+  p.push('for ' + nm.C + '=1,#' + nm.BL + ' do');
+  p.push('local ' + nm.V + '=' + nm.BL + '[' + nm.C + '] local ' + nm.I + '=1 local ' + nm.P + '=0 local ' + nm.Q + '={}');
+  p.push('while ' + nm.I + '<=#' + nm.V + ' do');
+  const ch0 = nm.M + '[' + nm.V + ':sub(' + nm.I + ',' + nm.I + ')]';
+  const ch1 = nm.M + '[' + nm.V + ':sub(' + nm.I + '+1,' + nm.I + '+1)]';
+  const ch2 = nm.M + '[' + nm.V + ':sub(' + nm.I + '+2,' + nm.I + '+2)]';
+  p.push('local ' + nm.HX + '=' + ch0 + '*3844+' + ch1 + '*62+' + ch2);
+  p.push('local ' + nm.B1 + '=math.floor(' + nm.HX + '/256) local ' + nm.B2 + '=' + nm.HX + '%256');
+  p.push(nm.P + '=' + nm.P + '+1 ' + nm.Q + '[' + nm.P + ']=(' + nm.B1 + '-((' + nm.P + '*' + nm.K1 + '[' + nm.C + ']+' + nm.K2 + '[' + nm.C + '])%256))%256');
+  p.push(nm.P + '=' + nm.P + '+1 ' + nm.Q + '[' + nm.P + ']=(' + nm.B2 + '-((' + nm.P + '*' + nm.K1 + '[' + nm.C + ']+' + nm.K2 + '[' + nm.C + '])%256))%256');
+  p.push(nm.I + '=' + nm.I + '+3 end');
+  p.push('local ' + nm.N + '={} for ' + nm.I + '=1,' + nm.LEN + '[' + nm.C + '] do ' + nm.N + '[' + nm.I + ']=string.char(' + nm.Q + '[' + nm.I + ']) end');
+  p.push(nm.OUT + '[' + nm.ORD + '[' + nm.C + ']]=table.concat(' + nm.N + ') end');
+  p.push('local ' + nm.S + '=table.concat(' + nm.OUT + ')');
+  p.push('if #' + nm.S + '~=' + numLit(ch.n, rnd) + ' then return end');
+  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV');
+  p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
+  wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
+  return p.join(' ');
+}
+
+function schemeB(src, rnd, hideErrors, rid) {
+  const bytes = toByteString(src);
+  const n = bytes.length;
+  const k1 = 1 + Math.floor(rnd() * 90);
+  const k2 = 1 + Math.floor(rnd() * 90);
+  const k3 = Math.floor(rnd() * 256);
+  const pairs = [];
+  for (let i = 0; i < n; i++) {
+    const b = bytes.charCodeAt(i) & 255;
+    const j = i + 1;
+    const e = (b + ((j * j * k1 + j * k2 + k3) % 256)) % 256;
+    pairs.push((e < 16 ? '0' : '') + e.toString(16));
+  }
+  const hex = pairs.reverse().join('');
+  const nm = loaderNames(rid);
+  const p = [];
+  p.push('local ' + nm.V + '="' + hex + '"');
+  p.push('local ' + nm.I + '=0 local ' + nm.Q + '={}');
+  p.push('for ' + nm.C + '=#' + nm.V + ',2,-2 do');
+  p.push(nm.I + '=' + nm.I + '+1');
+  p.push('local ' + nm.B1 + '=tonumber(' + nm.V + ':sub(' + nm.C + '-1,' + nm.C + '),16)');
+  p.push(nm.Q + '[' + nm.I + ']=string.char((' + nm.B1 + '-((' + nm.I + '*' + nm.I + '*' + k1 + '+' + nm.I + '*' + k2 + '+' + k3 + ')%256))%256)');
+  p.push('end');
+  p.push('local ' + nm.S + '=table.concat(' + nm.Q + ')');
+  p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' then return end');
+  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV');
+  p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
+  wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
+  return p.join(' ');
+}
+
+function schemeC(src, rnd, hideErrors, rid) {
+  const bytes = toByteString(src);
+  const n = bytes.length;
+  const k1 = 1 + Math.floor(rnd() * 200);
+  const k2 = Math.floor(rnd() * 256);
+  const arr = [];
+  for (let i = 0; i < n; i++) {
+    const b = bytes.charCodeAt(i) & 255;
+    const j = i + 1;
+    arr.push((b + ((j * j * 7 + j * k1 + k2) % 256)) % 256);
+  }
+  const nm = loaderNames(rid);
+  const p = [];
+  p.push('local ' + nm.V + '={' + arr.join(',') + '}');
+  p.push('local ' + nm.Q + '={}');
+  p.push('for ' + nm.I + '=1,#' + nm.V + ' do');
+  p.push(nm.Q + '[' + nm.I + ']=string.char((' + nm.V + '[' + nm.I + ']-((' + nm.I + '*' + nm.I + '*7+' + nm.I + '*' + k1 + '+' + k2 + ')%256))%256)');
+  p.push('end');
+  p.push('local ' + nm.S + '=table.concat(' + nm.Q + ')');
+  p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' and #' + nm.S + '~=' + numLit(n + 1, rnd) + ' then return end');
+  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV');
+  p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
+  wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
+  return p.join(' ');
+}
+
+const SCHEMES = [schemeA, schemeB, schemeC];
+
+function packBlob(src, rnd, hideErrors, rid, avoid) {
+  let idx = Math.floor(rnd() * SCHEMES.length);
+  if (SCHEMES.length > 1) {
+    let guard = 0;
+    while (idx === avoid && guard++ < 12) idx = Math.floor(rnd() * SCHEMES.length);
+  }
+  return { code: SCHEMES[idx](src, rnd, hideErrors, rid), scheme: idx };
 }
 
 module.exports = { luaObfuscate: luaObfuscate, lexLua: lexLua };
