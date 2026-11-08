@@ -42,6 +42,8 @@ const WEB_VERIFY_CHANNEL = process.env.WEB_VERIFY_CHANNEL || '156895472838850152
 const WELCOME_GIF = process.env.WELCOME_GIF || 'https://cdn.discordapp.com/attachments/1458606026847817772/1565270076960276570/how-to-make-gif-for-discord-4.gif';
 const LEAVE_GIF = process.env.LEAVE_GIF || 'https://cdn.discordapp.com/attachments/1458606026847817772/1565271048147042385/walter-white.gif';
 const VERIFY_IMG = process.env.VERIFY_IMG || 'https://cdn.discordapp.com/attachments/1458606026847817772/1565273294037581854/images.png';
+const CODE_GIF_FILE = path.join(__dirname, 'assets', 'verify-code.gif');
+const CODE_GIF_URL = process.env.CODE_GIF_URL || 'https://cdn.discordapp.com/attachments/1568081274344570880/1569137031509057657/image0.gif';
 
 const PURPLE = 0x9b59b6;
 const GREEN = 0x2ecc71;
@@ -166,21 +168,43 @@ async function sendVerifyLog(interaction, label) {
   await ch.send({ embeds: [embed] }).catch(function () {});
 }
 
-async function panelExists(channel, customId) {
+async function findPanel(channel, customId) {
   const recent = await channel.messages.fetch({ limit: 50 });
-  return !!recent.find(function (m) {
-    return m.author.id === client.user.id &&
-      m.components.some(function (r) {
-        return r.components.some(function (c) { return c.customId === customId; });
-      });
-  });
+  return recent.find(function (m) {
+    return m.components.some(function (r) {
+      return r.components.some(function (c) { return c.customId === customId; });
+    });
+  }) || null;
+}
+
+async function syncPanel(channel, customId, payload) {
+  const existing = await findPanel(channel, customId);
+  if (!existing) {
+    await channel.send(payload);
+    return 'sent';
+  }
+  if (existing.author.id === client.user.id) {
+    await existing.edit(payload).catch(function () {});
+    return 'edited';
+  }
+  await existing.delete().catch(function () {});
+  await channel.send(payload);
+  return 'replaced';
+}
+
+function codeGifFile() {
+  try {
+    if (fs.existsSync(CODE_GIF_FILE)) {
+      return new AttachmentBuilder(fs.readFileSync(CODE_GIF_FILE), { name: 'verify-code.gif' });
+    }
+  } catch (e) {}
+  return null;
 }
 
 async function ensureVerifyPanel() {
   try {
     const channel = await client.channels.fetch(VERIFY_CHANNEL).catch(function () { return null; });
     if (!channel) { console.log('❌ ไม่พบช่องยืนยันตัว'); return; }
-    if (await panelExists(channel, 'verify_start')) { console.log('✅ ปุ่มยืนยันตัวมีอยู่แล้ว'); return; }
     const embed = new EmbedBuilder()
       .setColor(GREEN)
       .setTitle('✅ ยืนยันตัวตน')
@@ -190,8 +214,8 @@ async function ensureVerifyPanel() {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('verify_start').setLabel('ยืนยันตัวตน').setEmoji('✅').setStyle(ButtonStyle.Success)
     );
-    await channel.send({ embeds: [embed], components: [row] });
-    console.log('✅ สร้างปุ่มยืนยันตัวแล้ว');
+    const r1 = await syncPanel(channel, 'verify_start', { embeds: [embed], components: [row] });
+    console.log('✅ แผงยืนยันตัว: ' + r1);
   } catch (err) {
     console.error('❌ สร้างปุ่มยืนยันไม่สำเร็จ:', err.message);
   }
@@ -201,19 +225,27 @@ async function ensureWebPanel() {
   try {
     const channel = await client.channels.fetch(WEB_VERIFY_CHANNEL).catch(function () { return null; });
     if (!channel) { console.log('❌ ไม่พบช่องยืนยันบัญชีเว็บ'); return; }
-    if (await panelExists(channel, 'hub_verify_button')) { console.log('✅ ปุ่มยืนยันบัญชีเว็บมีอยู่แล้ว'); return; }
+    const gif = codeGifFile();
     const embed = new EmbedBuilder()
-      .setTitle('ยืนยันบัญชี สกัด HUB')
-      .setDescription('กดปุ่มด้านล่างแล้วใส่รหัสที่เว็บให้มา\n\nตัวอย่างรหัส: `HUB-AB12-CD34`')
+      .setTitle('🔑 ยืนยันรหัส')
+      .setDescription(
+        'กดปุ่มด้านล่างแล้วใส่รหัสที่เว็บให้มา\n\n' +
+        'ตัวอย่างรหัส: `HUB-AB12-CD34`\n' +
+        'ห้ามแชร์รหัสให้คนอื่น · รหัสใช้ได้ครั้งเดียว'
+      )
       .setColor(0x000000)
-      .setFooter({ text: 'ห้ามแชร์รหัสให้คนอื่น · รหัสใช้ได้ครั้งเดียว' });
+      .setFooter({ text: 'ยืนยันรหัสจากเว็บเพื่อสร้างบัญชี' });
+    if (gif) embed.setImage('attachment://verify-code.gif');
+    else embed.setImage(CODE_GIF_URL);
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('hub_verify_button').setLabel('ยืนยันบัญชี').setStyle(ButtonStyle.Primary)
+      new ButtonBuilder().setCustomId('hub_verify_button').setLabel('ยืนยันรหัส').setStyle(ButtonStyle.Primary)
     );
-    await channel.send({ embeds: [embed], components: [row] });
-    console.log('✅ สร้างปุ่มยืนยันบัญชีเว็บแล้ว');
+    const payload = { embeds: [embed], components: [row] };
+    if (gif) payload.files = [gif];
+    const r = await syncPanel(channel, 'hub_verify_button', payload);
+    console.log('✅ แผงยืนยันรหัส: ' + r);
   } catch (err) {
-    console.error('❌ สร้างปุ่มยืนยันบัญชีเว็บไม่สำเร็จ:', err.message);
+    console.error('❌ สร้างแผงยืนยันรหัสไม่สำเร็จ:', err.message);
   }
 }
 
