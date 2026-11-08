@@ -204,11 +204,11 @@ const STMT_KEYWORDS = {
 };
 
 const LEVELS = {
-  1: { layers: 1, junk: 8, decoys: 6, strings: true,  numbers: true,  rename: true  },
-  2: { layers: 2, junk: 20, decoys: 14, strings: true,  numbers: true,  rename: true  },
-  3: { layers: 2, junk: 40, decoys: 28, strings: true,  numbers: true,  rename: true  },
-  4: { layers: 3, junk: 80, decoys: 55, strings: true,  numbers: true,  rename: true  },
-  5: { layers: 3, junk: 160, decoys: 110, strings: true, numbers: true,  rename: true  }
+  1: { layers: 1, junk: 1,   decoys: 6,   junkMul: 1,   strings: true, numbers: true, rename: true },
+  2: { layers: 2, junk: 2.5, decoys: 14,  junkMul: 2.5, strings: true, numbers: true, rename: true },
+  3: { layers: 2, junk: 5,   decoys: 40,  junkMul: 5,   strings: true, numbers: true, rename: true },
+  4: { layers: 3, junk: 7.5, decoys: 80,  junkMul: 7.5, strings: true, numbers: true, rename: true },
+  5: { layers: 3, junk: 10,  decoys: 140, junkMul: 10,  strings: true, numbers: true, rename: true }
 };
 
 function luaObfuscate(source, options) {
@@ -217,7 +217,7 @@ function luaObfuscate(source, options) {
   const o = Object.assign({
     strings: lv.strings, numbers: lv.numbers, rename: lv.rename,
     junk: true, wrap: true, hideErrors: true, seed: Date.now(),
-    layers: lv.layers, junkSize: lv.junk, decoys: lv.decoys, remote: false
+    layers: lv.layers, junkSize: lv.junk, decoys: lv.decoys, junkMul: lv.junkMul, remote: false
   }, opts);
   const rnd = rngFactory(o.seed || 1);
   const toks = lexLua(source);
@@ -278,9 +278,11 @@ function luaObfuscate(source, options) {
   const renameMap = new Array(real.length).fill(null);
 
   const ridChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  let ridCounter = 0;
   function rid() {
-    for (;;) {
-      const len = 1 + Math.floor(rnd() * 2);
+    for (let tries = 0; tries < 60; tries++) {
+      const maxLen = tries < 20 ? 2 : (tries < 40 ? 3 : 5);
+      const len = 1 + Math.floor(rnd() * maxLen);
       let out = '';
       for (let i = 0; i < len; i++) out += ridChars[Math.floor(rnd() * ridChars.length)];
       if (usedNames.has(out)) continue;
@@ -288,6 +290,13 @@ function luaObfuscate(source, options) {
       usedNames.add(out);
       return out;
     }
+    let out;
+    do {
+      ridCounter++;
+      out = 'z' + ridCounter.toString(36);
+    } while (usedNames.has(out) || LUA_KW[out]);
+    usedNames.add(out);
+    return out;
   }
 
   if (o.rename) {
@@ -578,19 +587,19 @@ function luaObfuscate(source, options) {
     for (let li = 0; li < layers; li++) result = packBlob(result, rnd, o.hideErrors, rid);
   }
 
-  const decoyCount = Math.max(0, Math.min(400, Number(o.decoys) || 0));
-  if (decoyCount > 0) {
-    const fns = [];
-    const names = [];
-    for (let i = 0; i < decoyCount; i++) names.push(rid());
-    const junk = buildJunk(rnd, rid, decoyCount);
-    for (let i = 0; i < names.length; i++) fns.push(names[i]);
-    const before = buildJunkCaller(rnd, rid, names, 'a');
-    const after = buildJunkCaller(rnd, rid, names, 'b');
-    result = junk + ' ' + before + after + ' return (function() ' + result + ' end)()';
+  const mul = Math.max(0, Number(o.junkMul) || 0);
+  const minDecoys = Math.max(0, Math.min(400, Number(o.decoys) || 0));
+  if (mul > 0 || minDecoys > 0) {
+    const targetChars = Math.min(1600000, Math.floor(result.length * mul));
+    const built = buildJunkToSize(rnd, rid, targetChars, minDecoys);
+    if (built.code) {
+      result = built.code + ' return (function() ' + result + ' end)()';
+    }
+    var decoyCount = built.count;
+    var junkChars = built.code.length;
   }
 
-  return { code: result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: decoyCount } };
+  return { code: result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0) } };
 }
 
 
@@ -637,6 +646,44 @@ function buildJunk(rnd, rid, count) {
     }
   }
   return out.join(' ');
+}
+
+function buildJunkToSize(rnd, rid, targetChars, minCount) {
+  const blocks = [];
+  const names = [];
+  let total = 0;
+  let guard = 0;
+  const hardMax = 20000;
+  const perBlock = 28;
+  let current = [];
+  let currentNames = [];
+
+  function flush() {
+    if (!current.length) return;
+    const caller = buildJunkCaller(rnd, rid, currentNames, 'b');
+    blocks.push('do ' + current.join(' ') + ' ' + caller + 'end');
+    total += 5;
+    current = [];
+    currentNames = [];
+  }
+
+  while ((total < targetChars || names.length < minCount) && names.length < hardMax && guard < 200000) {
+    const one = buildJunk(rnd, rid, 1);
+    const nm = extractFnName(one);
+    current.push(one);
+    currentNames.push(nm);
+    names.push(nm);
+    total += one.length + 1;
+    guard++;
+    if (current.length >= perBlock) flush();
+  }
+  flush();
+  return { code: blocks.join(' '), names: names, count: names.length };
+}
+
+function extractFnName(code) {
+  const m = /^local function (\w+)/.exec(code);
+  return m ? m[1] : '';
 }
 
 function buildJunkCaller(rnd, rid, fns, tag) {
