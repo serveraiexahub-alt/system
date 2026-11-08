@@ -9,7 +9,7 @@
 | `server.js` | เว็บ + REST API ทั้งหมด |
 | `obf.js` | เครื่องมือปกปิดโค้ด Lua (3 scheme, หลายชั้น, โค้ดขยะ) |
 | `captcha.js` | สร้างรูป captcha 4 หลัก (PNG) |
-| `bot.js` | บอท Discord สำหรับยืนยันบัญชี |
+| `bot.js` | บอท Discord (ยืนยันตัวตน + ต้อนรับ/ลาก่อน + กันสแปม) |
 | `update.sh` | อัปเดตจาก git + restart |
 
 ## ติดตั้ง
@@ -68,8 +68,17 @@ export WEB_URL=https://โดเมนของคุณ
 export DISCORD_CHANNEL_ID=1568954728388501524
 ```
 
-บอทจะส่งแผงปุ่ม "ยืนยันบัญชี" ไปที่ห้องที่กำหนด และจำ `messageId` ไว้ใน `bot-state.json`
-→ ปิด/เปิดบอทใหม่จะใช้ข้อความเดิม (ปุ่มเดิม) ไม่ส่งใหม่
+บอททำ 4 อย่าง:
+
+1. **ยืนยันตัวตนในเซิร์ฟเวอร์** — ปุ่มในห้อง `VERIFY_CHANNEL` → ส่งรูปรหัส 5 หลัก → ถูกต้องได้ยศ `VERIFIED_ROLE_ID`
+2. **ยืนยันบัญชีเว็บ** — ปุ่มในห้อง `WEB_VERIFY_CHANNEL` → ใส่รหัส `HUB-XXXX-XXXX` → สร้างบัญชีบนเว็บให้
+3. **ต้อนรับ/ลาก่อน** — ส่ง embed + GIF ลงห้อง `WELCOME_CHANNEL` / `LEAVE_CHANNEL`
+4. **กันสแปม/ยิงกลุ่ม** — สแปม 3 ข้อความใน 1 วิ = timeout 10 นาที, ยิงข้อความเดิม 3 ห้อง = เตะ
+
+ทั้งสองปุ่มเป็น **persistent** — ค้นหาในห้องก่อน ถ้ามีอยู่แล้วจะใช้ของเดิมไม่ส่งซ้ำ
+
+⚠️ ต้องเปิดใน Discord Developer Portal → Bot → Privileged Gateway Intents:
+`SERVER MEMBERS` และ `MESSAGE CONTENT` ไม่งั้นบอทจะออนไลน์ไม่ขึ้น
 
 ## วิธีสมัคร
 

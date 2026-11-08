@@ -70,7 +70,8 @@ function encodePNG(width, height, rgb) {
 function randInt(n) { return Math.floor(Math.random() * n); }
 
 function makeCaptcha(opts) {
-  const o = Object.assign({ width: 190, height: 64, digits: 4 }, opts || {});
+  const o = Object.assign({ height: 64, digits: 4 }, opts || {});
+  o.width = o.width || 56 + o.digits * 42;
   const W = o.width, H = o.height;
   const rgb = Buffer.alloc(W * H * 3);
 
@@ -93,14 +94,14 @@ function makeCaptcha(opts) {
   const answerStr = answer.join('');
 
   const scale = 5 + randInt(2);
-  const startX = 12 + randInt(6);
+  const startX = 14 + randInt(4);
   const step = Math.floor((W - startX * 2) / o.digits);
 
   for (let d = 0; d < o.digits; d++) {
     const glyph = FONT[String(answer[d])];
     const baseX = startX + d * step + randInt(6) - 3;
     const baseY = 8 + randInt(10);
-    const shear = (Math.random() * 0.5 - 0.25);
+    const shear = (Math.random() * 0.3 - 0.15);
     const color = [
       30 + randInt(110),
       30 + randInt(110),
@@ -143,8 +144,8 @@ function makeCaptcha(opts) {
     px(randInt(W), randInt(H), v, v, v);
   }
 
-  const amp = 2.2 + Math.random() * 1.6;
-  const lam = 26 + randInt(18);
+  const amp = 1.4 + Math.random() * 1.2;
+  const lam = 30 + randInt(16);
   const shift = Math.random() * Math.PI * 2;
   const warped = Buffer.alloc(W * H * 3);
   for (let y = 0; y < H; y++) {
