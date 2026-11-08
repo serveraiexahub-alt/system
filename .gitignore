@@ -5,3 +5,4 @@ data.json.tmp
 .env
 bot-state.json
 bot.lock
+bot.log
