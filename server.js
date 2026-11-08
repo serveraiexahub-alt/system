@@ -3,6 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { luaObfuscate } = require('./obf.js');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -56,7 +57,6 @@ function ensureDb() {
   db.folders = db.folders || {};
   db.follows = db.follows || {};
   db.favorites = db.favorites || {};
-  db.supports = db.supports || [];
   db.signupLog = db.signupLog || [];
   db.ipReg = db.ipReg || {};
   db.fpReg = db.fpReg || {};
@@ -169,7 +169,6 @@ function limiter(req, res, next) {
   next();
 }
 
-const SUPPORT_PHONE = process.env.SUPPORT_PHONE || '0809647719';
 const SIGNUP_IP_MAX = Math.max(1, Number(process.env.SIGNUP_IP_MAX) || 5);
 const SIGNUP_FP_MAX = Math.max(1, Number(process.env.SIGNUP_FP_MAX) || 3);
 const SIGNUP_WINDOW_H = Math.max(1, Number(process.env.SIGNUP_WINDOW_H) || 24);
@@ -197,16 +196,6 @@ function recordSignup(req, uid) {
   if (db.signupLog.length > 5000) db.signupLog = db.signupLog.slice(-5000);
   db.ipReg[ipKey(info.ip)] = db.users[uid].created;
   if (info.fp) db.fpReg[info.fp] = db.users[uid].created;
-}
-function supportAgg() {
-  const map = {};
-  (db.supports || []).forEach(function (s) {
-    if (!map[s.uid]) map[s.uid] = { uid: s.uid, total: 0, count: 0, last: 0 };
-    map[s.uid].total += Number(s.amount) || 0;
-    map[s.uid].count += 1;
-    if (s.ts > map[s.uid].last) map[s.uid].last = s.ts;
-  });
-  return Object.values(map).sort(function (a, b) { return b.total - a.total || b.count - a.count; });
 }
 
 function rawUrl(req, fid) {
@@ -357,49 +346,50 @@ app.put('/api/profile', auth, function (req, res) {
   res.json({ ok: true, user: { id: u.id, username: u.username, nick: u.nick || '', avatar: u.avatar || '' } });
 });
 
-app.get('/api/support', auth, function (req, res) {
-  const u = req.user;
-  const mine = (db.supports || []).filter(function (s) { return s.uid === u.id; });
-  const total = mine.reduce(function (a, s) { return a + (Number(s.amount) || 0); }, 0);
-  const board = supportAgg().slice(0, 10).map(function (row, i) {
-    const person = ownGet(db.users, row.uid) || {};
-    return {
-      rank: i + 1,
-      uid: row.uid,
-      username: person.username || '?',
-      nick: person.nick || '',
-      avatar: person.avatar || '',
-      total: row.total,
-      count: row.count
+app.post('/api/obfuscate', auth, function (req, res) {
+  const body = req.body || {};
+  const code = String(body.code == null ? '' : body.code);
+  const fileName = String(body.name || '').trim();
+  if (!code.trim()) return res.status(400).json({ error: 'Code is empty' });
+  if (code.length > MAX_CODE) return res.status(413).json({ error: 'Code exceeds 2 MB limit' });
+  let out;
+  try {
+    out = luaObfuscate(code, {
+      seed: Math.floor(Math.random() * 2147483646) + 1,
+      rename: body.rename !== false,
+      strings: body.strings !== false,
+      numbers: body.numbers !== false,
+      junk: body.junk !== false,
+      wrap: body.wrap !== false,
+      hideErrors: body.hideErrors === true
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'Obfuscation failed: ' + e.message });
+  }
+  const result = { ok: true, code: out.code, stats: out.stats };
+  if (body.save === true) {
+    if (!fileName) return res.status(400).json({ error: 'File name is required to save' });
+    if (fileName.length > MAX_NAME) return res.status(400).json({ error: 'File name too long' });
+    const fid = id(8);
+    const now = Date.now();
+    const folder = body.folder && ownGet(db.folders, String(body.folder)) ? String(body.folder) : null;
+    const vis = body.visibility === 'private' ? 'private' : 'public';
+    const f = {
+      id: fid, owner: req.user.id, name: fileName, code: out.code,
+      created: now, updated: now, shares: [], invites: [],
+      history: [{ ts: now, charsAdded: out.code.length, charsRemoved: 0, linesAdded: out.code.split('\n').length, linesRemoved: 0, total: out.code.length }],
+      folder: folder, visibility: vis
     };
-  });
-  const myRank = supportAgg().findIndex(function (r) { return r.uid === u.id; });
-  res.json({
-    phone: SUPPORT_PHONE,
-    link: String(process.env.SUPPORT_LINK || ''),
-    myTotal: total,
-    myCount: mine.length,
-    myRank: myRank >= 0 ? myRank + 1 : 0,
-    board: board
-  });
-});
-
-app.post('/api/support', limiter, auth, function (req, res) {
-  const u = req.user;
-  const amount = Number((req.body || {}).amount);
-  const slip = String((req.body || {}).slip || '').trim();
-  if (!isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'Amount must be greater than 0' });
-  if (amount > 1000000) return res.status(400).json({ error: 'Amount too large' });
-  if (slip.length > 400) return res.status(400).json({ error: 'Reference too long' });
-  db.supports = db.supports || [];
-  db.supports.push({ id: id(8), uid: u.id, amount: Math.round(amount * 100) / 100, slip: slip, ts: Date.now() });
-  if (db.supports.length > 20000) db.supports = db.supports.slice(-20000);
-  save();
-  const board = supportAgg().slice(0, 10).map(function (row, i) {
-    const person = ownGet(db.users, row.uid) || {};
-    return { rank: i + 1, uid: row.uid, username: person.username || '?', nick: person.nick || '', avatar: person.avatar || '', total: row.total, count: row.count };
-  });
-  res.status(201).json({ ok: true, phone: SUPPORT_PHONE, board: board });
+    if (folder) {
+      const fo = ownGet(db.folders, folder);
+      if (fo.owner === req.user.id) { fo.files = fo.files || []; if (fo.files.indexOf(fid) < 0) fo.files.push(fid); fo.updated = now; }
+      else f.folder = null;
+    }
+    db.files[fid] = f;
+    save();
+    result.saved = { id: fid, name: fileName, rawUrl: rawUrl(req, fid) };
+  }
+  res.json(result);
 });
 
 app.get('/api/files', auth, function (req, res) {
@@ -816,22 +806,21 @@ const LOCK_PAGE = `<!doctype html>
 <link rel="icon" type="image/png" href="https://files.catbox.moe/okwlyx.png">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
 body {
   background: #000; color: #fff; min-height: 100vh;
   display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
-.box { max-width: 520px; }
-.box img { width: 76px; height: 76px; border-radius: 18px; border: 1px solid #333; margin-bottom: 28px; }
-h1 { font-size: 22px; line-height: 1.8; letter-spacing: 1px; font-weight: 700; }
-p { margin-top: 18px; color: #8a8a8a; font-size: 12px; letter-spacing: 1px; }
+.box { max-width: 560px; width: 100%; display: flex; flex-direction: column; align-items: center; }
+.box img { width: 100%; max-width: 420px; height: auto; border-radius: 16px; border: 1px solid #222; display: block; }
+h1 { margin-top: 26px; font-size: 20px; line-height: 1.6; letter-spacing: 1px; font-weight: 700; }
 </style>
 </head>
 <body>
 <div class="box">
-<img src="https://files.catbox.moe/okwlyx.png" alt="">
-<h1>ที่นี้ไม่ต้อนรับคุณเชิญออก🚪</h1>
-<p>This resource is only accessible by script</p>
+<img src="https://files.catbox.moe/obsyq1.jpeg" alt="">
+<h1>คุณมาผิดซอยแล้ว</h1>
 </div>
 </body>
 </html>`;
@@ -997,6 +986,14 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 .bname { flex: 1; display: flex; align-items: center; gap: 7px; font-size: 13px; min-width: 0; }
 .bname span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bamt { font-size: 12px; font-weight: 700; flex: 0 0 auto; }
+.obfgrid { display: flex; flex-direction: column; gap: 10px; }
+.obfout { width: 100%; min-height: 180px; max-height: 300px; background: var(--bg2); border: 1px solid var(--line2); color: var(--fg); border-radius: 9px; padding: 11px 12px; font-family: inherit; font-size: 11px; line-height: 1.5; white-space: pre; overflow: auto; margin: 0; }
+.obfrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.obfrow .obflbl { color: var(--muted); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+.obfstat { color: var(--muted); font-size: 11px; }
+.obfopts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.obfopts .chk { margin: 0; padding: 8px 10px; font-size: 11px; }
+.monoarea { min-height: 140px; }
 </style>
 </head>
 <body>
@@ -1030,13 +1027,14 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     back: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>',
     chev: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>',
     camera: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>',
+    settings: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>',
     heart: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>',
     trophy: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"></path><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"></path><path d="M4 22h16"></path><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"></path><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"></path><path d="M18 2H6v7a6 6 0 0 0 12 0V2z"></path></svg>',
     copy2: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>'
   };
   var T = {
-    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', support:'สนับสนุน', support_title:'สนับสนุน', support_phone:'เบอร์พร้อมเพย์ / TrueMoney', support_copy:'คัดลอกเบอร์', support_open:'เปิดแอป TrueMoney', support_amount:'จำนวนเงิน (บาท)', support_ref:'เลขอ้างอิง / โน้ต', support_send:'บันทึกการสนับสนุน', support_board:'อันดับผู้สนับสนุน', support_mine:'ยอดของคุณ', support_rank:'อันดับ', support_none:'ยังไม่มีผู้สนับสนุน', support_thanks:'ขอบคุณมาก!', support_note:'โอนเงินก่อน แล้วค่อยมากรอกจำนวนตรงนี้', support_you:'คุณ' },
-    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', support:'Support', support_title:'Support', support_phone:'TrueMoney phone', support_copy:'Copy number', support_open:'Open TrueMoney', support_amount:'Amount (THB)', support_ref:'Reference / note', support_send:'Record support', support_board:'Top supporters', support_mine:'Your total', support_rank:'Rank', support_none:'No supporters yet', support_thanks:'Thank you!', support_note:'Send the money first, then record it here with the amount.', support_you:'You' }
+    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', obf:'ปกปิดโค้ด Lua', obf_title:'Lua Obfuscator', obf_input:'โค้ด Lua', obf_input_ph:'วางโค้ด Lua ที่นี่ หรือกดอัปโหลดไฟล์', obf_pick:'อัปโหลดไฟล์', obf_no_file:'ยังไม่ได้เลือกไฟล์', obf_run:'ปกปิด', obf_running:'กำลังปกปิด...', obf_output:'ผลลัพธ์', obf_copy:'คัดลอกผลลัพธ์', obf_save:'สร้างไฟล์จากผลลัพธ์', obf_name:'ชื่อไฟล์', obf_name_ph:'obfuscated', obf_options:'ตัวเลือก', obf_opt_rename:'เปลี่ยนชื่อตัวแปร', obf_opt_strings:'เข้ารหัสสตริง', obf_opt_numbers:'แปลงตัวเลข', obf_opt_junk:'ใส่โค้ดหลอก', obf_opt_wrap:'ห่อด้วย loader', obf_opt_hide:'ซ่อน error', obf_done:'ปกปิดเสร็จแล้ว', obf_empty:'ใส่โค้ดก่อน', obf_saved:'สร้างไฟล์แล้ว', obf_stats:'ผลลัพธ์', obf_strong:'โหมดแน่นหนา', obf_clear:'ล้าง' },
+    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', obf:'Protect Lua code', obf_title:'Lua Obfuscator', obf_input:'Lua code', obf_input_ph:'Paste Lua code here, or upload a file', obf_pick:'Upload file', obf_no_file:'No file selected', obf_run:'Protect', obf_running:'Protecting...', obf_output:'Output', obf_copy:'Copy output', obf_save:'Create file from output', obf_name:'File name', obf_name_ph:'obfuscated', obf_options:'Options', obf_opt_rename:'Rename variables', obf_opt_strings:'Encrypt strings', obf_opt_numbers:'Transform numbers', obf_opt_junk:'Insert decoy code', obf_opt_wrap:'Wrap in loader', obf_opt_hide:'Hide errors', obf_done:'Done', obf_empty:'Enter code first', obf_saved:'File created', obf_stats:'Result', obf_strong:'Strong mode', obf_clear:'Clear' }
   };
   var LANG = localStorage.getItem('lang') || 'th';
   function t(k) { var d = T[LANG] || T.th; return d[k] != null ? d[k] : (T.th[k] != null ? T.th[k] : k); }
@@ -1661,54 +1659,103 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
   }
-  function openSupport() {
+  function openObfuscator() {
     var overlay = document.createElement('div'); overlay.className = 'overlay';
-    overlay.innerHTML = '<div class="modal"><h3>' + ICON.heart + ' ' + t('support_title') + '</h3><div class="body" id="supbody">' +
-      '<div class="hint">' + t('loading') + '</div></div>' +
-      '<div class="foot"><button class="btn ghost" id="supc">' + t('close') + '</button></div></div>';
+    overlay.innerHTML = '<div class="modal"><h3>' + ICON.lock + ' ' + t('obf_title') + '</h3><div class="body">' +
+      '<div class="field"><label>' + ICON.code + ' ' + t('obf_input') + '</label>' +
+      '<textarea class="input monoarea" id="obfin" placeholder="' + t('obf_input_ph') + '" spellcheck="false"></textarea>' +
+      '<div class="obfrow" style="margin-top:8px"><button class="btn ghost small" id="obfpick" type="button">' + ICON.file + ' ' + t('obf_pick') + '</button>' +
+      '<span class="obfstat" id="obffname">' + t('obf_no_file') + '</span></div>' +
+      '<input type="file" id="obffile" accept=".lua,.txt,text/plain" style="display:none"></div>' +
+      '<div class="field"><label>' + ICON.settings + ' ' + t('obf_options') + '</label><div class="obfopts">' +
+      '<label class="chk"><input type="checkbox" id="obfRename" checked> ' + t('obf_opt_rename') + '</label>' +
+      '<label class="chk"><input type="checkbox" id="obfStrings" checked> ' + t('obf_opt_strings') + '</label>' +
+      '<label class="chk"><input type="checkbox" id="obfNumbers" checked> ' + t('obf_opt_numbers') + '</label>' +
+      '<label class="chk"><input type="checkbox" id="obfJunk" checked> ' + t('obf_opt_junk') + '</label>' +
+      '<label class="chk"><input type="checkbox" id="obfWrap" checked> ' + t('obf_opt_wrap') + '</label>' +
+      '<label class="chk"><input type="checkbox" id="obfHide"> ' + t('obf_opt_hide') + '</label>' +
+      '</div></div>' +
+      '<div class="obfrow"><span class="obfstat" id="obfstat"></span>' +
+      '<div style="display:flex;gap:8px"><button class="btn ghost small" id="obfclear">' + t('obf_clear') + '</button>' +
+      '<button class="btn small" id="obfrun">' + ICON.lock + ' ' + t('obf_run') + '</button></div></div>' +
+      '<div class="field" style="margin-top:14px"><label>' + ICON.file + ' ' + t('obf_output') + '</label>' +
+      '<pre class="obfout" id="obfout">' + t('none') + '</pre>' +
+      '<div class="obfrow" style="margin-top:8px"><button class="btn ghost small" id="obfcopy">' + ICON.copy + ' ' + t('obf_copy') + '</button>' +
+      '<button class="btn ghost small" id="obfsavebtn">' + ICON.plus + ' ' + t('obf_save') + '</button></div></div>' +
+      '</div><div class="foot"><button class="btn ghost" id="obfclose">' + t('close') + '</button></div></div>';
     document.body.appendChild(overlay);
-    overlay.querySelector('#supc').onclick = function () { overlay.remove(); };
+    overlay.querySelector('#obfclose').onclick = function () { overlay.remove(); };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
-    renderSupport(overlay);
-  }
-  function renderSupport(overlay) {
-    var body = overlay.querySelector('#supbody');
-    api('/api/support').then(function (d) {
-      var me = state.user || {};
-      var html = '<div class="supbox">' +
-        '<div class="suprow"><span class="suplbl">' + t('support_phone') + '</span>' +
-        '<div class="supphone"><b>' + esc(d.phone) + '</b><button class="iconbtn" id="supcopy" title="' + t('support_copy') + '">' + ICON.copy + '</button></div></div>' +
-        (d.link ? '<a class="btn ghost" style="margin-top:10px" href="' + esc(d.link) + '" target="_blank" rel="noopener">' + ICON.link + ' ' + t('support_open') + '</a>' : '') +
-        '<div class="hint">' + t('support_note') + '</div>' +
-        '</div>' +
-        '<div class="field" style="margin-top:14px"><label>' + ICON.heart + ' ' + t('support_amount') + '</label>' +
-        '<input class="input" id="supamt" type="number" min="1" step="1" placeholder="20"></div>' +
-        '<div class="field"><label>' + ICON.info + ' ' + t('support_ref') + '</label>' +
-        '<input class="input" id="supref" maxlength="60" placeholder="' + t('support_ref') + '" spellcheck="false"></div>' +
-        '<button class="btn" id="supsend">' + ICON.check + ' ' + t('support_send') + '</button>' +
-        '<div class="fsec">' + t('support_board') + '</div>' +
-        '<div class="supme">' + t('support_mine') + ': <b>' + (d.myTotal || 0) + ' THB</b>' +
-        (d.myRank ? ' · ' + t('support_rank') + ' #' + d.myRank : '') + '</div>' +
-        (d.board && d.board.length ? '<div class="board">' + d.board.map(function (row) {
-          var isMe = row.uid === me.id;
-          return '<div class="brow' + (isMe ? ' me' : '') + '">' +
-            '<div class="brank">' + (row.rank <= 3 ? '<span class="medal m' + row.rank + '">' + row.rank + '</span>' : '#' + row.rank) + '</div>' +
-            avat(row, 'sm') +
-            '<div class="bname"><span>' + esc(row.nick || row.username) + '</span>' + (isMe ? '<span class="tag">' + t('support_you') + '</span>' : '') + '</div>' +
-            '<div class="bamt">' + row.total + ' THB</div></div>';
-        }).join('') + '</div>' : '<div class="hint">' + t('support_none') + '</div>');
-      body.innerHTML = html;
-      overlay.querySelector('#supcopy').onclick = function () { copyText(d.phone); toast(t('support_copy')); };
-      overlay.querySelector('#supsend').onclick = function () {
-        var amt = Number(overlay.querySelector('#supamt').value);
-        var ref = overlay.querySelector('#supref').value.trim();
-        if (!isFinite(amt) || amt <= 0) { toast(t('support_amount'), true); return; }
-        api('/api/support', { method: 'POST', body: { amount: amt, slip: ref } }).then(function () {
-          toast(t('support_thanks'));
-          renderSupport(overlay);
+    var inEl = overlay.querySelector('#obfin');
+    var outEl = overlay.querySelector('#obfout');
+    var statEl = overlay.querySelector('#obfstat');
+    var fnameEl = overlay.querySelector('#obffname');
+    var last = '';
+    overlay.querySelector('#obfpick').onclick = function () { overlay.querySelector('#obffile').click(); };
+    overlay.querySelector('#obffile').addEventListener('change', function (e) {
+      var file = e.target.files[0]; if (!file) return;
+      fnameEl.textContent = file.name;
+      var reader = new FileReader();
+      reader.onload = function () { inEl.value = String(reader.result || ''); };
+      reader.readAsText(file);
+    });
+    overlay.querySelector('#obfclear').onclick = function () {
+      inEl.value = ''; outEl.textContent = t('none'); statEl.textContent = ''; last = ''; fnameEl.textContent = t('obf_no_file');
+    };
+    overlay.querySelector('#obfrun').onclick = function () {
+      var code = inEl.value;
+      if (!code.trim()) { toast(t('obf_empty'), true); return; }
+      var btn = overlay.querySelector('#obfrun');
+      btn.disabled = true; statEl.textContent = t('obf_running');
+      api('/api/obfuscate', { method: 'POST', body: {
+        code: code,
+        rename: overlay.querySelector('#obfRename').checked,
+        strings: overlay.querySelector('#obfStrings').checked,
+        numbers: overlay.querySelector('#obfNumbers').checked,
+        junk: overlay.querySelector('#obfJunk').checked,
+        wrap: overlay.querySelector('#obfWrap').checked,
+        hideErrors: overlay.querySelector('#obfHide').checked
+      } }).then(function (d) {
+        last = d.code;
+        outEl.textContent = d.code;
+        statEl.textContent = t('obf_stats') + ': ' + d.stats.original + ' -> ' + d.stats.output + ' B · ' + d.stats.strings + ' str';
+        toast(t('obf_done'));
+      }).catch(function (e) { toast(e.message, true); statEl.textContent = ''; })
+        .then(function () { btn.disabled = false; });
+    };
+    overlay.querySelector('#obfcopy').onclick = function () {
+      if (!last) { toast(t('obf_empty'), true); return; }
+      copyText(last); toast(t('copy'));
+    };
+    overlay.querySelector('#obfsavebtn').onclick = function () {
+      if (!last) { toast(t('obf_empty'), true); return; }
+      var suggested = (fnameEl.textContent !== t('obf_no_file') ? fnameEl.textContent.replace(/\.[^.]+$/, '') : 'obfuscated');
+      var overlay2 = document.createElement('div'); overlay2.className = 'overlay';
+      overlay2.innerHTML = '<div class="modal smallm"><h3>' + ICON.file + ' ' + t('obf_save') + '</h3><div class="body">' +
+        '<div class="field"><label>' + ICON.file + ' ' + t('obf_name') + '</label><input class="input" id="obfname" placeholder="' + t('obf_name_ph') + '" spellcheck="false" value="' + esc(suggested) + '"></div>' +
+        '</div><div class="foot"><button class="btn ghost" id="obfsc">' + t('cancel') + '</button><button class="btn" id="obfss">' + t('create') + '</button></div></div>';
+      document.body.appendChild(overlay2);
+      overlay2.querySelector('#obfsc').onclick = function () { overlay2.remove(); };
+      overlay2.querySelector('#obfname').focus();
+      overlay2.querySelector('#obfss').onclick = function () {
+        var nm = overlay2.querySelector('#obfname').value.trim();
+        if (!nm) { toast(t('obf_name'), true); return; }
+        api('/api/obfuscate', { method: 'POST', body: {
+          code: inEl.value, name: nm, save: true,
+          rename: overlay.querySelector('#obfRename').checked,
+          strings: overlay.querySelector('#obfStrings').checked,
+          numbers: overlay.querySelector('#obfNumbers').checked,
+          junk: overlay.querySelector('#obfJunk').checked,
+          wrap: overlay.querySelector('#obfWrap').checked,
+          hideErrors: overlay.querySelector('#obfHide').checked
+        } }).then(function (d) {
+          overlay2.remove();
+          toast(t('obf_saved'));
+          loadFiles(); loadFolders();
         }).catch(function (e) { toast(e.message, true); });
       };
-    }).catch(function (e) { body.innerHTML = '<div class="hint">' + esc(e.message) + '</div>'; });
+      overlay2.addEventListener('click', function (e) { if (e.target === overlay2) overlay2.remove(); });
+    };
   }
   function openFollowing() {
     var overlay = document.createElement('div'); overlay.className = 'overlay';
@@ -1786,9 +1833,9 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<div class="dprof">' + avat(me, 'big') + '<div><div class="dpn">' + esc(me.nick || me.username) + '</div><div class="dpu">@' + esc(me.username) + '</div></div></div>' +
       '<button class="ditem" id="d-prof">' + ICON.user + ' ' + t('view_profile') + '</button>' +
       '<button class="ditem" id="d-edit">' + ICON.edit + ' ' + t('edit_profile') + '</button>' +
+      '<button class="ditem" id="d-obf">' + ICON.code + ' ' + t('obf') + '</button>' +
       '<button class="ditem" id="d-fav">' + ICON.star + ' ' + t('nav_fav') + '</button>' +
       '<button class="ditem" id="d-fol">' + ICON.userplus + ' ' + t('following_t') + '</button>' +
-      '<button class="ditem" id="d-sup">' + ICON.heart + ' ' + t('support') + '</button>' +
       '<button class="ditem" id="d-inv">' + ICON.userplus + ' ' + t('invites') + '<span class="dbadge" id="dbadge">' + state.invites.length + '</span></button>' +
       '<div class="ditem dlang"><span>' + t('language') + '</span><div class="langs">' +
       '<button data-lang="th" class="' + (LANG === 'th' ? 'on' : '') + '">ไทย</button>' +
@@ -1801,9 +1848,9 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     var db = overlay.querySelector('#dbadge'); if (db && !state.invites.length) db.style.display = 'none';
     overlay.querySelector('#d-prof').onclick = function () { overlay.remove(); openProfile(state.user.username); };
     overlay.querySelector('#d-edit').onclick = function () { overlay.remove(); openEditProfile(); };
+    overlay.querySelector('#d-obf').onclick = function () { overlay.remove(); openObfuscator(); };
     overlay.querySelector('#d-fav').onclick = function () { overlay.remove(); renderFavModal(); };
     overlay.querySelector('#d-fol').onclick = function () { overlay.remove(); openFollowing(); };
-    overlay.querySelector('#d-sup').onclick = function () { overlay.remove(); openSupport(); };
     overlay.querySelector('#d-inv').onclick = function () { overlay.remove(); openInvites(); };
     overlay.querySelector('#d-out').onclick = function () {
       api('/api/logout', { method: 'POST' }).then(function () { overlay.remove(); state.user = null; renderAuth('login'); });
