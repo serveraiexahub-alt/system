@@ -4,3 +4,4 @@ data.json.tmp
 .secret
 .env
 bot-state.json
+bot.lock

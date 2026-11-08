@@ -49,10 +49,55 @@ function saveState(st) {
 }
 let state = loadState();
 
+const LOCK_FILE = path.join(__dirname, 'bot.lock');
+try {
+  const oldPid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8'), 10);
+  if (oldPid && oldPid !== process.pid) {
+    try {
+      process.kill(oldPid, 0);
+      console.error('another bot instance is already running (pid ' + oldPid + '). kill it first.');
+      process.exit(1);
+    } catch (e) {}
+  }
+} catch (e) {}
+try { fs.writeFileSync(LOCK_FILE, String(process.pid)); } catch (e) {}
+function removeLock() {
+  try {
+    if (parseInt(fs.readFileSync(LOCK_FILE, 'utf8'), 10) === process.pid) fs.unlinkSync(LOCK_FILE);
+  } catch (e) {}
+}
+process.on('exit', removeLock);
+process.on('SIGINT', function () { removeLock(); process.exit(0); });
+process.on('SIGTERM', function () { removeLock(); process.exit(0); });
+
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
   partials: [Partials.Channel]
 });
+
+process.on('unhandledRejection', function (e) {
+  console.error('unhandledRejection:', (e && (e.message || e.code)) || e);
+});
+process.on('uncaughtException', function (e) {
+  console.error('uncaughtException:', (e && (e.message || e.code)) || e);
+});
+client.on('error', function (e) { console.error('client error:', (e && e.message) || e); });
+client.on('shardError', function (e) { console.error('shard error:', (e && e.message) || e); });
+
+const seenInteractions = new Map();
+function freshInteraction(id) {
+  const now = Date.now();
+  if (seenInteractions.has(id)) return false;
+  seenInteractions.set(id, now);
+  if (seenInteractions.size > 800) {
+    for (const [k, t] of seenInteractions) if (now - t > 180000) seenInteractions.delete(k);
+  }
+  return true;
+}
+
+function isExpired(err) {
+  return err && (err.code === 10062 || err.code === 40060 || err.status === 404);
+}
 
 function panelPayload() {
   const embed = new EmbedBuilder()
@@ -94,9 +139,10 @@ async function onReady() {
   await ensurePanel();
 }
 client.once('clientReady', onReady);
-client.once('ready', onReady);
 
 client.on('interactionCreate', async function (interaction) {
+  if (!interaction.isRepliable()) return;
+  if (!freshInteraction(interaction.id)) return;
   try {
     if (interaction.isButton() && interaction.customId === BUTTON_ID) {
       const modal = new ModalBuilder().setCustomId(MODAL_ID).setTitle('ยืนยันบัญชี');
@@ -109,11 +155,23 @@ client.on('interactionCreate', async function (interaction) {
         .setRequired(true)
         .setPlaceholder('HUB-AB12-CD34');
       modal.addComponents(new ActionRowBuilder().addComponents(input));
-      return interaction.showModal(modal);
+      if (interaction.replied || interaction.deferred) return;
+      try {
+        await interaction.showModal(modal);
+      } catch (e) {
+        if (!isExpired(e)) console.error('showModal failed:', e.message || e.code);
+      }
+      return;
     }
 
     if (interaction.isModalSubmit() && interaction.customId === MODAL_ID) {
-      await interaction.deferReply({ ephemeral: true });
+      if (interaction.replied || interaction.deferred) return;
+      try {
+        await interaction.deferReply({ ephemeral: true });
+      } catch (e) {
+        if (isExpired(e)) return;
+        throw e;
+      }
       const code = String(interaction.fields.getTextInputValue('code') || '').trim().toUpperCase();
       const res = await fetch(WEB_URL + '/api/discord/verify', {
         method: 'POST',
@@ -127,15 +185,18 @@ client.on('interactionCreate', async function (interaction) {
       });
       const data = await res.json().catch(function () { return {}; });
       if (!res.ok) {
-        return interaction.editReply({ content: 'ยืนยันไม่สำเร็จ: ' + (data.error || 'unknown error') });
+        await interaction.editReply({ content: 'ยืนยันไม่สำเร็จ: ' + (data.error || 'unknown error') }).catch(function () {});
+        return;
       }
-      return interaction.editReply({ content: 'ยืนยันสำเร็จ! บัญชี "' + data.username + '" ถูกสร้างแล้ว — กลับไปที่เว็บได้เลย' });
+      await interaction.editReply({ content: 'ยืนยันสำเร็จ! บัญชี "' + data.username + '" ถูกสร้างแล้ว — กลับไปที่เว็บได้เลย' }).catch(function () {});
     }
   } catch (e) {
-    console.error('interaction error', e);
-    if (interaction.deferred || interaction.replied) {
-      interaction.editReply({ content: 'เกิดข้อผิดพลาด ลองใหม่' }).catch(function () {});
-    }
+    if (!isExpired(e)) console.error('interaction error:', e.message || e.code);
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({ content: 'เกิดข้อผิดพลาด ลองใหม่' }).catch(function () {});
+      }
+    } catch (x) {}
   }
 });
 
