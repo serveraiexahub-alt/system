@@ -19,6 +19,7 @@ function utf8Bytes(cp) {
 }
 
 function toByteString(str) {
+  if (typeof Buffer !== 'undefined') return Buffer.from(String(str), 'utf8').toString('latin1');
   let out = '';
   for (let i = 0; i < str.length; i++) {
     const cp = str.codePointAt(i);
@@ -223,7 +224,7 @@ function luaObfuscate(source, options) {
   const toks = lexLua(source);
   const real = toks.filter(function (x) { return x.t !== 'nl'; });
 
-  for (let i = 0; i < real.length; i++) real[i].idx = i;
+  for (let i = 0; i < real.length; i++) { real[i].idx = i; real[i].ridx = i; }
 
   const depthAt = new Array(real.length).fill(0);
   const braceAt = new Array(real.length).fill(0);
@@ -252,8 +253,8 @@ function luaObfuscate(source, options) {
     if (prevMark && CONTINUE_PREV[prevMark]) continue;
     if (nextMark && CONTINUE_NEXT[nextMark]) continue;
     if (next.t === 'kw' && (next.v === 'end' || next.v === 'until' || next.v === 'else' || next.v === 'elseif')) continue;
-    let pidx = 0;
-    for (let k = pi; k >= 0; k--) { if (toks[k].t !== 'nl') { pidx = real.indexOf(toks[k]); break; } }
+    const ptk = toks[pi];
+    const pidx = (ptk && typeof ptk.ridx === 'number') ? ptk.ridx : -1;
     if (pidx >= 0) ends[pidx] = true;
   }
 
@@ -596,7 +597,7 @@ function luaObfuscate(source, options) {
   const minDecoys = Math.max(0, Math.min(400, Number(o.decoys) || 0));
   if (mul > 0 || minDecoys > 0) {
     const baseLen = String(source).length;
-    const targetChars = Math.min(900000, Math.floor(baseLen * mul));
+    const targetChars = Math.min(9000000, Math.floor(baseLen * mul));
     const built = buildJunkToSize(rnd, rid, targetChars, minDecoys);
     if (built.code) {
       const st = Math.floor(rnd() * 4);
@@ -827,12 +828,12 @@ function schemeA(src, rnd, hideErrors, rid) {
       arr.push((b + (((i + 1) * k1 + k2) % 256)) % 256);
     }
     if (arr.length % 2) arr.push(0);
-    let blob = '';
-    for (let i = 0; i < arr.length; i += 2) {
+    const out = new Array(arr.length / 2);
+    for (let i = 0, p2 = 0; i < arr.length; i += 2, p2++) {
       const v = arr[i] * 256 + arr[i + 1];
-      blob += B62[Math.floor(v / 3844)] + B62[Math.floor((v % 3844) / 62)] + B62[v % 62];
+      out[p2] = B62[Math.floor(v / 3844)] + B62[Math.floor((v % 3844) / 62)] + B62[v % 62];
     }
-    return { blob: blob, len: bytes.length, k1: k1, k2: k2, k3: k3 };
+    return { blob: out.join(''), len: bytes.length, k1: k1, k2: k2, k3: k3 };
   });
   const p = [];
   const nm = names;
