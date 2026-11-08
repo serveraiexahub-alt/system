@@ -27,7 +27,7 @@ function loadSecret() {
 const SECRET = process.env.SECRET || loadSecret();
 
 app.disable('x-powered-by');
-app.set('trust proxy', 1);
+app.set('trust proxy', String(process.env.TRUST_PROXY || '1') !== '0');
 app.use(express.json({ limit: '3mb' }));
 app.use(function (req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -161,7 +161,7 @@ function setSession(res, uid) {
 
 const hits = {};
 function limiter(req, res, next) {
-  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '?';
+  const ip = realIp(req);
   const now = Date.now();
   const win = 15 * 60 * 1000, max = 30;
   hits[ip] = (hits[ip] || []).filter(function (t) { return now - t < win; });
@@ -174,8 +174,22 @@ const SIGNUP_IP_MAX = Math.max(1, Number(process.env.SIGNUP_IP_MAX) || 5);
 const SIGNUP_FP_MAX = Math.max(1, Number(process.env.SIGNUP_FP_MAX) || 3);
 const SIGNUP_WINDOW_H = Math.max(1, Number(process.env.SIGNUP_WINDOW_H) || 24);
 
+const TRUST_PROXY = String(process.env.TRUST_PROXY || '1') !== '0';
+
+function realIp(req) {
+  if (TRUST_PROXY) {
+    const cf = String(req.headers['cf-connecting-ip'] || '').trim();
+    if (cf) return cf;
+    const xr = String(req.headers['x-real-ip'] || '').trim();
+    if (xr) return xr;
+    const xf = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    if (xf) return xf;
+  }
+  return String(req.socket.remoteAddress || '?').replace(/^::ffff:/, '');
+}
+
 function clientIp(req) {
-  return String((req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '?').replace(/^::ffff:/, '');
+  return realIp(req);
 }
 function ipKey(ip) { return crypto.createHmac('sha256', SECRET).update(ip).digest('hex').slice(0, 32); }
 function fpFromReq(req) {
