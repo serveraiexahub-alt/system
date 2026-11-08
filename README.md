@@ -1,1 +1,79 @@
-# system
+# สกัด HUB — system
+
+เว็บโฮสต์สคริปต์ Lua + ระบบสมาชิก + Lua Obfuscator + ยืนยันตัวตนผ่าน Discord
+
+## โครงสร้าง
+
+| ไฟล์ | หน้าที่ |
+|---|---|
+| `server.js` | เว็บ + REST API ทั้งหมด |
+| `obf.js` | เครื่องมือปกปิดโค้ด Lua (3 scheme, หลายชั้น, โค้ดขยะ) |
+| `captcha.js` | สร้างรูป captcha 4 หลัก (PNG) |
+| `bot.js` | บอท Discord สำหรับยืนยันบัญชี |
+| `update.sh` | อัปเดตจาก git + restart |
+
+## ติดตั้ง
+
+```bash
+npm install
+```
+
+## ตัวแปรสภาพแวดล้อม (สำคัญ)
+
+```bash
+PORT=3000
+DATA_FILE=./data.json
+
+SECRET=<hex สุ่ม 32 ไบต์>          # ถ้าไม่ตั้ง จะสุ่มใหม่ทุก restart = ผู้ใช้หลุดหมด
+TRUST_PROXY=1                      # อยู่หลัง Cloudflare = 1
+
+SIGNUP_IP_MAX=5                    # จำนวนบัญชีต่อ IP ต่อวัน
+SIGNUP_FP_MAX=3                    # จำนวนบัญชีต่อเครื่องต่อวัน
+SIGNUP_WINDOW_H=24
+
+OBF_DAILY_LIMIT=5                  # จำนวนครั้งที่ปกปิดโค้ดได้ต่อวัน
+
+# Discord
+BOT_SECRET=<สตริงลับ>              # ต้องตรงกับฝั่งบอท (ถ้าไม่ตั้ง = ปิดการยืนยัน)
+DISCORD_GUILD=                     # (ไม่บังคับ) จำกัดเฉพาะเซิร์ฟเวอร์นี้
+DISCORD_INVITE=https://discord.gg/WnB2wtHy5
+```
+
+`CAPTCHA_DEBUG=1` สำหรับทดสอบเท่านั้น (คืนคำตอบ captcha มาด้วย) — **ห้ามเปิดบน production**
+
+## รันเว็บ
+
+```bash
+node server.js
+```
+
+## รันบอท Discord
+
+```bash
+npm run bot
+```
+
+ต้องตั้งค่าเพิ่ม:
+
+```bash
+export DISCORD_TOKEN=<token บอท>
+export BOT_SECRET=<ต้องตรงกับฝั่งเว็บ>
+export WEB_URL=https://โดเมนของคุณ
+export DISCORD_CHANNEL_ID=1568954728388501524
+```
+
+บอทจะส่งแผงปุ่ม "ยืนยันบัญชี" ไปที่ห้องที่กำหนด และจำ `messageId` ไว้ใน `bot-state.json`
+→ ปิด/เปิดบอทใหม่จะใช้ข้อความเดิม (ปุ่มเดิม) ไม่ส่งใหม่
+
+## วิธีสมัคร
+
+1. กรอกชื่อผู้ใช้/รหัสผ่าน + **เลข captcha 4 หลักจากรูป**
+2. ระบบออก **รหัสยืนยัน** เช่น `HUB-AB12-CD34` (อายุ 15 นาที)
+3. กดเข้ากลุ่ม Discord → กดปุ่ม **ยืนยันบัญชี** → ใส่รหัส
+4. บอทตรวจแล้ว บัญชีถูกสร้างให้อัตโนมัติ (หน้าเว็บรออยู่แล้ว)
+
+## อัปเดต
+
+```bash
+./update.sh
+```

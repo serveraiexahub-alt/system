@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { luaObfuscate } = require('./obf.js');
+const { makeCaptcha } = require('./captcha.js');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -63,6 +64,7 @@ function ensureDb() {
   db.ipReg = db.ipReg || {};
   db.fpReg = db.fpReg || {};
   db.vaults = db.vaults || {};
+  db.pending = db.pending || {};
   Object.values(db.users).forEach(function (u) {
     if (typeof u.nick !== 'string') u.nick = '';
     if (typeof u.avatar !== 'string') u.avatar = '';
@@ -207,6 +209,15 @@ function recentSignups(req) {
   const fromFp = fp ? (db.signupLog || []).filter(function (r) { return r.fp === fp && r.ts > dayAgo; }).length : 0;
   return { ip: ip, fp: fp, fromIp: fromIp, fromFp: fromFp };
 }
+function recordSignupDirect(ip, fp, uid) {
+  db.signupLog = db.signupLog || [];
+  db.signupLog.push({ ip: ip || '?', fp: fp || '', uid: uid, ts: Date.now() });
+  if (db.signupLog.length > 5000) db.signupLog = db.signupLog.slice(-5000);
+  db.ipReg = db.ipReg || {};
+  db.ipReg[ipKey(ip || '?')] = Date.now();
+  if (fp) { db.fpReg = db.fpReg || {}; db.fpReg[fp] = Date.now(); }
+}
+
 function recordSignup(req, uid) {
   const info = recentSignups(req);
   db.signupLog.push({ ip: info.ip, fp: info.fp, uid: uid, ts: Date.now() });
@@ -308,12 +319,151 @@ function pushHistory(f, stat) {
   if (f.history.length > MAX_HISTORY) f.history = f.history.slice(f.history.length - MAX_HISTORY);
 }
 
-app.post('/api/signup', limiter, function (req, res) {
-  const username = String((req.body || {}).username || '').trim().toLowerCase();
-  const password = String((req.body || {}).password || '');
+const captchaStore = new Map();
+
+function pruneCaptchas() {
+  const now = Date.now();
+  for (const [k, v] of captchaStore) if (v.exp < now) captchaStore.delete(k);
+}
+
+app.get('/api/captcha', function (req, res) {
+  pruneCaptchas();
+  const c = makeCaptcha({ digits: 4 });
+  const cid = id(12);
+  captchaStore.set(cid, { answer: c.answer, exp: Date.now() + 5 * 60 * 1000 });
+  res.setHeader('Cache-Control', 'no-store');
+  const out = { id: cid, image: 'data:image/png;base64,' + c.png.toString('base64') };
+  if (process.env.CAPTCHA_DEBUG === '1') out.answer = c.answer;
+  res.json(out);
+});
+
+function makeVerifyCode() {
+  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let body = '';
+  for (let i = 0; i < 8; i++) body += A[Math.floor(Math.random() * A.length)];
+  return 'HUB-' + body.slice(0, 4) + '-' + body.slice(4);
+}
+
+const DISCORD_GUILD = String(process.env.DISCORD_GUILD || '');
+const DISCORD_INVITE = String(process.env.DISCORD_INVITE || 'https://discord.gg/WnB2wtHy5');
+const BOT_SECRET = String(process.env.BOT_SECRET || '');
+const REQUIRE_DISCORD = BOT_SECRET.length > 0;
+
+app.post('/api/signup/begin', limiter, function (req, res) {
+  const body = req.body || {};
+  const username = String(body.username || '').trim().toLowerCase();
+  const password = String(body.password || '');
+  const captchaId = String(body.captchaId || '');
+  const captchaAnswer = String(body.captcha || '').trim();
+
   if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'Username must be 3-20 characters (a-z, 0-9, _)' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
   for (const u of Object.values(db.users)) if (u.username === username) return res.status(409).json({ error: 'Username already taken' });
+
+  const cap = captchaStore.get(captchaId);
+  if (!cap || cap.exp < Date.now()) return res.status(400).json({ error: 'Captcha expired, reload it' });
+  captchaStore.delete(captchaId);
+  if (cap.answer !== captchaAnswer) return res.status(400).json({ error: 'Wrong captcha code' });
+
+  const info = recentSignups(req);
+  if (info.fromIp >= SIGNUP_IP_MAX) return res.status(429).json({ error: 'This network already created too many accounts today. Try again tomorrow.' });
+  if (info.fp && info.fromFp >= SIGNUP_FP_MAX) return res.status(429).json({ error: 'This device already created too many accounts today. Try again tomorrow.' });
+
+  const token = id(18);
+  const code = makeVerifyCode();
+  db.pending[token] = {
+    token: token, username: username, hash: hash(password), code: code,
+    created: Date.now(), verified: false, discordId: '', discordName: '',
+    ip: info.ip, fp: info.fp
+  };
+  save();
+  res.status(201).json({
+    ok: true,
+    token: token,
+    code: code,
+    discord: DISCORD_INVITE,
+    requiresDiscord: REQUIRE_DISCORD,
+    expiresIn: 15 * 60
+  });
+});
+
+app.get('/api/signup/poll', limiter, function (req, res) {
+  const token = String(req.query.t || '');
+  const p = ownGet(db.pending || {}, token);
+  if (!p) return res.status(404).json({ error: 'Pending signup not found' });
+  if (Date.now() - p.created > 15 * 60 * 1000) {
+    delete db.pending[token];
+    save();
+    return res.status(410).json({ error: 'Verification expired, start again' });
+  }
+  if (!p.verified) return res.json({ status: 'pending' });
+
+  for (const u of Object.values(db.users)) if (u.username === p.username) return res.status(409).json({ error: 'Username already taken' });
+  const uid = id(10);
+  db.users[uid] = {
+    id: uid, username: p.username, hash: p.hash, created: Date.now(),
+    discordId: p.discordId || '', discordName: p.discordName || ''
+  };
+  recordSignupDirect(p.ip, p.fp, uid);
+  delete db.pending[token];
+  save();
+  setSession(res, uid);
+  res.json({ status: 'ok', user: { id: uid, username: p.username, nick: '', avatar: '' } });
+});
+
+app.post('/api/discord/verify', function (req, res) {
+  if (!BOT_SECRET) return res.status(503).json({ error: 'Discord verification is not configured' });
+  const got = String(req.headers['x-bot-secret'] || '');
+  const a = Buffer.from(got), b = Buffer.from(BOT_SECRET);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(403).json({ error: 'Forbidden' });
+
+  const body = req.body || {};
+  const code = String(body.code || '').trim().toUpperCase();
+  const discordId = String(body.discordId || '').trim();
+  const discordName = String(body.discordName || '').trim().slice(0, 64);
+  const guildId = String(body.guildId || '').trim();
+  if (!code || !discordId) return res.status(400).json({ error: 'code and discordId are required' });
+  if (DISCORD_GUILD && guildId && guildId !== DISCORD_GUILD) return res.status(403).json({ error: 'Wrong server' });
+
+  let found = null, key = null;
+  for (const k of Object.keys(db.pending || {})) {
+    const p = db.pending[k];
+    if (!p.verified && p.code === code) { found = p; key = k; break; }
+  }
+  if (!found) return res.status(404).json({ error: 'Invalid or already used code' });
+  if (Date.now() - found.created > 15 * 60 * 1000) {
+    delete db.pending[key];
+    save();
+    return res.status(410).json({ error: 'Code expired' });
+  }
+  for (const k of Object.keys(db.pending || {})) {
+    const p = db.pending[k];
+    if (!p.verified && p.discordId === discordId) { delete db.pending[k]; }
+  }
+  found.verified = true;
+  found.discordId = discordId;
+  found.discordName = discordName;
+  found.verifiedAt = Date.now();
+  save();
+  res.json({ ok: true, username: found.username });
+});
+
+app.post('/api/signup', limiter, function (req, res) {
+  if (REQUIRE_DISCORD) {
+    return res.status(400).json({ error: 'Use /api/signup/begin with captcha and Discord verification' });
+  }
+  const body = req.body || {};
+  const username = String(body.username || '').trim().toLowerCase();
+  const password = String(body.password || '');
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'Username must be 3-20 characters (a-z, 0-9, _)' });
+  if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  for (const u of Object.values(db.users)) if (u.username === username) return res.status(409).json({ error: 'Username already taken' });
+
+  const cap = captchaStore.get(String(body.captchaId || ''));
+  if (!cap || cap.exp < Date.now()) return res.status(400).json({ error: 'Captcha expired, reload it' });
+  captchaStore.delete(String(body.captchaId || ''));
+  if (cap.answer !== String(body.captcha || '').trim()) return res.status(400).json({ error: 'Wrong captcha code' });
+
   const info = recentSignups(req);
   if (info.fromIp >= SIGNUP_IP_MAX) return res.status(429).json({ error: 'This network already created too many accounts today. Try again tomorrow.' });
   if (info.fp && info.fromFp >= SIGNUP_FP_MAX) return res.status(429).json({ error: 'This device already created too many accounts today. Try again tomorrow.' });
@@ -356,18 +506,54 @@ app.put('/api/profile', auth, function (req, res) {
   if (body.avatar !== undefined) {
     const a = String(body.avatar).trim();
     if (a.length > 400000) return res.status(413).json({ error: 'Image too large (max 300 KB)' });
-    if (a && !/^data:image\/(png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(a)) return res.status(400).json({ error: 'Invalid image data' });
+    if (a) {
+      const bad = checkImageData(a);
+      if (bad) return res.status(400).json({ error: bad });
+    }
     u.avatar = a;
   }
   save();
   res.json({ ok: true, user: { id: u.id, username: u.username, nick: u.nick || '', avatar: u.avatar || '' } });
 });
 
+const IMG_MAGIC = {
+  png: [0x89, 0x50, 0x4E, 0x47],
+  jpg: [0xFF, 0xD8, 0xFF],
+  gif: [0x47, 0x49, 0x46, 0x38],
+  webp: [0x52, 0x49, 0x46, 0x46]
+};
+
+function checkImageData(dataUrl) {
+  const m = /^data:image\/(png|jpe?g|gif|webp);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!m) return 'Only PNG, JPEG, GIF or WebP are allowed';
+  const kind = m[1] === 'jpg' || m[1] === 'jpeg' ? 'jpg' : m[1];
+  let buf;
+  try { buf = Buffer.from(m[2], 'base64'); } catch (e) { return 'Invalid image data'; }
+  if (buf.length < 12) return 'Image is corrupted';
+  if (buf.length > 300 * 1024) return 'Image too large (max 300 KB)';
+  const magic = IMG_MAGIC[kind];
+  for (let i = 0; i < magic.length; i++) {
+    if (buf[i] !== magic[i]) return 'File content does not match its type';
+  }
+  const head = buf.slice(0, 512).toString('latin1').toLowerCase();
+  if (head.indexOf('<script') >= 0 || head.indexOf('<svg') >= 0 || head.indexOf('javascript:') >= 0) {
+    return 'Suspicious image content rejected';
+  }
+  if (kind === 'webp') {
+    if (buf.slice(8, 12).toString('ascii') !== 'WEBP') return 'Bad WebP header';
+  }
+  if (kind === 'gif') {
+    const tail = buf.slice(Math.max(0, buf.length - 4096)).toString('latin1').toLowerCase();
+    if (tail.indexOf('<script') >= 0) return 'Suspicious GIF content rejected';
+  }
+  return null;
+}
+
 function baseUrl(req) {
   return (req.headers['x-forwarded-proto'] || req.protocol) + '://' + req.headers.host;
 }
 
-app.get('/api/vault/:id', function (req, res) {
+app.get('/api/vault/:id', limiter, function (req, res) {
   const v = ownGet(db.vaults || {}, req.params.id);
   if (!v) return res.status(404).send('');
   if (String(req.query.k || '') !== v.token) return res.status(403).send('');
@@ -520,10 +706,21 @@ app.get('/api/files', auth, function (req, res) {
   res.json({ files: list });
 });
 
+function badText(t) {
+  if (t.indexOf('\u0000') >= 0) return true;
+  let ctrl = 0;
+  for (let i = 0; i < t.length; i++) {
+    const c = t.charCodeAt(i);
+    if (c < 9 || (c > 13 && c < 32)) ctrl++;
+  }
+  return ctrl > Math.max(8, t.length * 0.02);
+}
+
 app.post('/api/files', auth, function (req, res) {
   const name = String((req.body || {}).name || '').trim();
   const code = String((req.body || {}).code || '');
   if (!name) return res.status(400).json({ error: 'File name is required' });
+  if (badText(code)) return res.status(400).json({ error: 'File looks binary, only text scripts are allowed' });
   if (name.length > MAX_NAME) return res.status(400).json({ error: 'File name too long' });
   if (code.length > MAX_CODE) return res.status(413).json({ error: 'Code exceeds 10 MB limit' });
   const fid = id(8);
@@ -557,6 +754,7 @@ app.put('/api/files/:id', auth, badKey, function (req, res) {
   if (!name) return res.status(400).json({ error: 'File name is required' });
   if (name.length > MAX_NAME) return res.status(400).json({ error: 'File name too long' });
   if (code.length > MAX_CODE) return res.status(413).json({ error: 'Code exceeds 10 MB limit' });
+  if (body.code !== undefined && badText(code)) return res.status(400).json({ error: 'File looks binary, only text scripts are allowed' });
   if (body.code !== undefined) pushHistory(f, diffStat(f.code, code));
   f.name = name;
   f.code = code;
@@ -1102,6 +1300,10 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 .obfopts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .obfopts .chk { margin: 0; padding: 8px 10px; font-size: 11px; }
 .monoarea { min-height: 140px; }
+.capbox { display: flex; align-items: center; gap: 10px; }
+.capbox img { height: 64px; width: 190px; border-radius: 8px; border: 1px solid var(--line2); background: #f4f4f4; }
+.verifycode { font-family: ui-monospace, monospace; font-size: 22px; font-weight: 800; letter-spacing: 2px; background: var(--bg2); border: 1px dashed var(--line2); border-radius: 10px; padding: 16px; text-align: center; margin: 10px 0 12px; word-break: break-all; }
+.verifywait { margin-top: 14px; color: var(--muted); font-size: 12px; text-align: center; }
 .lvlrow { display: flex; gap: 7px; }
 .lvlbtn { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 9px 4px; background: var(--bg2); border: 1px solid var(--line2); color: var(--muted); border-radius: 10px; font-family: inherit; font-size: 11px; transition: all .12s; }
 .lvlbtn:hover { border-color: var(--fg); color: var(--fg); }
@@ -1142,13 +1344,14 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     camera: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>',
     shield: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>',
     settings: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>',
+    refresh: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>',
     heart: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>',
     trophy: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"></path><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"></path><path d="M4 22h16"></path><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"></path><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"></path><path d="M18 2H6v7a6 6 0 0 0 12 0V2z"></path></svg>',
     copy2: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>'
   };
   var T = {
-    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', obf:'ปกปิดโค้ด Lua', obf_title:'Lua Obfuscator', obf_input:'โค้ด Lua', obf_input_ph:'วางโค้ด Lua ที่นี่ หรือกดอัปโหลดไฟล์', obf_pick:'อัปโหลดไฟล์', obf_no_file:'ยังไม่ได้เลือกไฟล์', obf_run:'ปกปิด', obf_running:'กำลังปกปิด...', obf_output:'ผลลัพธ์', obf_copy:'คัดลอกผลลัพธ์', obf_save:'สร้างไฟล์จากผลลัพธ์', obf_name:'ชื่อไฟล์', obf_name_ph:'obfuscated', obf_options:'ตัวเลือก', obf_opt_rename:'เปลี่ยนชื่อตัวแปร', obf_opt_strings:'เข้ารหัสสตริง', obf_opt_numbers:'แปลงตัวเลข', obf_opt_junk:'ใส่โค้ดหลอก', obf_opt_wrap:'ห่อด้วย loader', obf_opt_hide:'ซ่อน error', obf_done:'ปกปิดเสร็จแล้ว', obf_empty:'ใส่โค้ดก่อน', obf_saved:'สร้างไฟล์แล้ว', obf_stats:'ผลลัพธ์', obf_strong:'โหมดแน่นหนา', obf_clear:'ล้าง', obf_level:'ระดับความยาก', obf_lv1:'1 · เบา', obf_lv2:'2 · กลาง', obf_lv3:'3 · หนัก', obf_lv4:'4 · โหด', obf_lv5:'5 · สุดโหด', obf_lv1_hint:'เร็วสุด ไฟล์เล็ก แต่แกะง่าย', obf_lv2_hint:'สมดุล ไฟล์กลางๆ', obf_lv3_hint:'แนะนำ — แกะยาก ไฟล์ใหญ่ขึ้น', obf_lv4_hint:'โหด 3 ชั้น + ขยะเยอะ', obf_lv5_hint:'สุดโหด ไฟล์ใหญ่หลายเท่า แกะนานมาก', obf_remote:'เก็บตัวแปรไว้บนเว็บ', obf_remote_on:'เปิด (สคริปต์จะดึงค่าตอนรัน)', obf_edit:'แก้ไขไฟล์', obf_updated:'อัปเดตไฟล์แล้ว', obf_left:'เหลือ', obf_limit:'ใช้ครบ 5 ครั้ง/วันแล้ว', obf_copy_blocked:'โหมดเก็บตัวแปรบนเว็บ — คัดลอกไม่ได้ ต้องสร้างหรือแก้ไขไฟล์' },
-    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', obf:'Protect Lua code', obf_title:'Lua Obfuscator', obf_input:'Lua code', obf_input_ph:'Paste Lua code here, or upload a file', obf_pick:'Upload file', obf_no_file:'No file selected', obf_run:'Protect', obf_running:'Protecting...', obf_output:'Output', obf_copy:'Copy output', obf_save:'Create file from output', obf_name:'File name', obf_name_ph:'obfuscated', obf_options:'Options', obf_opt_rename:'Rename variables', obf_opt_strings:'Encrypt strings', obf_opt_numbers:'Transform numbers', obf_opt_junk:'Insert decoy code', obf_opt_wrap:'Wrap in loader', obf_opt_hide:'Hide errors', obf_done:'Done', obf_empty:'Enter code first', obf_saved:'File created', obf_stats:'Result', obf_strong:'Strong mode', obf_clear:'Clear', obf_level:'Difficulty', obf_lv1:'1 · Light', obf_lv2:'2 · Medium', obf_lv3:'3 · Heavy', obf_lv4:'4 · Brutal', obf_lv5:'5 · Insane', obf_lv1_hint:'Fastest, smallest file, easy to crack', obf_lv2_hint:'Balanced, medium size', obf_lv3_hint:'Recommended — hard to crack', obf_lv4_hint:'Brutal: 3 layers + heavy junk', obf_lv5_hint:'Insane: huge file, very slow to crack', obf_remote:'Remote variables', obf_remote_on:'Enable (script fetches values at runtime)', obf_edit:'Edit file', obf_updated:'File updated', obf_left:'Left', obf_limit:'Daily limit reached (5/day)', obf_copy_blocked:'Remote mode — copying disabled, use create or edit file' }
+    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', captcha:'ยืนยันตัวตน', captcha_ph:'ใส่เลข 4 หลัก', captcha_hint:'พิมพ์เลขในรูป (ติดกัน)', verify_title:'ยืนยันบัญชีผ่าน Discord', verify_steps:'กดลิงก์เข้ากลุ่ม Discord → กดปุ่ม ยืนยันบัญชี → ใส่รหัสข้างบน → ระบบจะสมัครให้อัตโนมัติ', verify_join:'เข้ากลุ่ม Discord', verify_waiting:'รอการยืนยัน... (อย่าปิดหน้านี้)', verify_expired:'หมดเวลา — เริ่มสมัครใหม่', obf:'ปกปิดโค้ด Lua', obf_title:'Lua Obfuscator', obf_input:'โค้ด Lua', obf_input_ph:'วางโค้ด Lua ที่นี่ หรือกดอัปโหลดไฟล์', obf_pick:'อัปโหลดไฟล์', obf_no_file:'ยังไม่ได้เลือกไฟล์', obf_run:'ปกปิด', obf_running:'กำลังปกปิด...', obf_output:'ผลลัพธ์', obf_copy:'คัดลอกผลลัพธ์', obf_save:'สร้างไฟล์จากผลลัพธ์', obf_name:'ชื่อไฟล์', obf_name_ph:'obfuscated', obf_options:'ตัวเลือก', obf_opt_rename:'เปลี่ยนชื่อตัวแปร', obf_opt_strings:'เข้ารหัสสตริง', obf_opt_numbers:'แปลงตัวเลข', obf_opt_junk:'ใส่โค้ดหลอก', obf_opt_wrap:'ห่อด้วย loader', obf_opt_hide:'ซ่อน error', obf_done:'ปกปิดเสร็จแล้ว', obf_empty:'ใส่โค้ดก่อน', obf_saved:'สร้างไฟล์แล้ว', obf_stats:'ผลลัพธ์', obf_strong:'โหมดแน่นหนา', obf_clear:'ล้าง', obf_level:'ระดับความยาก', obf_lv1:'1 · เบา', obf_lv2:'2 · กลาง', obf_lv3:'3 · หนัก', obf_lv4:'4 · โหด', obf_lv5:'5 · สุดโหด', obf_lv1_hint:'เร็วสุด ไฟล์เล็ก แต่แกะง่าย', obf_lv2_hint:'สมดุล ไฟล์กลางๆ', obf_lv3_hint:'แนะนำ — แกะยาก ไฟล์ใหญ่ขึ้น', obf_lv4_hint:'โหด 3 ชั้น + ขยะเยอะ', obf_lv5_hint:'สุดโหด ไฟล์ใหญ่หลายเท่า แกะนานมาก', obf_remote:'เก็บตัวแปรไว้บนเว็บ', obf_remote_on:'เปิด (สคริปต์จะดึงค่าตอนรัน)', obf_edit:'แก้ไขไฟล์', obf_updated:'อัปเดตไฟล์แล้ว', obf_left:'เหลือ', obf_limit:'ใช้ครบ 5 ครั้ง/วันแล้ว', obf_copy_blocked:'โหมดเก็บตัวแปรบนเว็บ — คัดลอกไม่ได้ ต้องสร้างหรือแก้ไขไฟล์' },
+    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', captcha:'Verification', captcha_ph:'Enter 4 digits', captcha_hint:'Type the digits shown in the image', verify_title:'Verify via Discord', verify_steps:'Join the Discord → press the verify button → enter the code above → your account is created automatically', verify_join:'Join Discord', verify_waiting:'Waiting for verification... (keep this page open)', verify_expired:'Expired — start again', obf:'Protect Lua code', obf_title:'Lua Obfuscator', obf_input:'Lua code', obf_input_ph:'Paste Lua code here, or upload a file', obf_pick:'Upload file', obf_no_file:'No file selected', obf_run:'Protect', obf_running:'Protecting...', obf_output:'Output', obf_copy:'Copy output', obf_save:'Create file from output', obf_name:'File name', obf_name_ph:'obfuscated', obf_options:'Options', obf_opt_rename:'Rename variables', obf_opt_strings:'Encrypt strings', obf_opt_numbers:'Transform numbers', obf_opt_junk:'Insert decoy code', obf_opt_wrap:'Wrap in loader', obf_opt_hide:'Hide errors', obf_done:'Done', obf_empty:'Enter code first', obf_saved:'File created', obf_stats:'Result', obf_strong:'Strong mode', obf_clear:'Clear', obf_level:'Difficulty', obf_lv1:'1 · Light', obf_lv2:'2 · Medium', obf_lv3:'3 · Heavy', obf_lv4:'4 · Brutal', obf_lv5:'5 · Insane', obf_lv1_hint:'Fastest, smallest file, easy to crack', obf_lv2_hint:'Balanced, medium size', obf_lv3_hint:'Recommended — hard to crack', obf_lv4_hint:'Brutal: 3 layers + heavy junk', obf_lv5_hint:'Insane: huge file, very slow to crack', obf_remote:'Remote variables', obf_remote_on:'Enable (script fetches values at runtime)', obf_edit:'Edit file', obf_updated:'File updated', obf_left:'Left', obf_limit:'Daily limit reached (5/day)', obf_copy_blocked:'Remote mode — copying disabled, use create or edit file' }
   };
   var LANG = localStorage.getItem('lang') || 'th';
   function t(k) { var d = T[LANG] || T.th; return d[k] != null ? d[k] : (T.th[k] != null ? T.th[k] : k); }
@@ -1202,23 +1405,90 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<div class="err" id="err"></div>' +
       '<div class="field"><label>' + ICON.user + ' ' + t('username') + '</label><input class="input" id="username" autocomplete="username" spellcheck="false"></div>' +
       '<div class="field"><label>' + ICON.lock + ' ' + t('password') + '</label><input class="input" id="password" type="password" autocomplete="' + (signup ? 'new-password' : 'current-password') + '"></div>' +
+      (signup ? '<div class="field"><label>' + ICON.shield + ' ' + t('captcha') + '</label>' +
+        '<div class="capbox"><img id="capimg" alt="" src=""><button class="iconbtn" id="capreload" title="reload">' + ICON.refresh + '</button></div>' +
+        '<input class="input" id="capanswer" placeholder="' + t('captcha_ph') + '" inputmode="numeric" maxlength="4" style="margin-top:8px" spellcheck="false">' +
+        '<div class="hint">' + t('captcha_hint') + '</div></div>' : '') +
       '<button class="btn" id="go">' + t(signup ? 'signup' : 'login') + '</button>' +
       '<div class="switch">' + (signup ? t('have_account') + ' <a href="#" id="sw">' + t('login') + '</a>' : t('no_account') + ' <a href="#" id="sw">' + t('signup') + '</a>') + '</div></div></div>';
+
+    var capId = '';
+    if (signup) loadCaptcha();
+
     document.getElementById('sw').onclick = function (e) { e.preventDefault(); renderAuth(signup ? 'login' : 'signup'); };
     document.getElementById('go').onclick = submitAuth;
     document.getElementById('password').onkeydown = function (e) { if (e.key === 'Enter') submitAuth(); };
+    if (signup) {
+      document.getElementById('capreload').onclick = loadCaptcha;
+      document.getElementById('capanswer').onkeydown = function (e) { if (e.key === 'Enter') submitAuth(); };
+    }
     document.getElementById('username').focus();
+
+    function loadCaptcha() {
+      var img = document.getElementById('capimg');
+      if (!img) return;
+      img.removeAttribute('src');
+      api('/api/captcha').then(function (d) {
+        capId = d.id;
+        img.src = d.image;
+      }).catch(function (e) { toast(e.message, true); });
+    }
+
     function submitAuth() {
       var u = document.getElementById('username').value.trim(), p = document.getElementById('password').value;
       var err = document.getElementById('err'); err.style.display = 'none';
       var hdrs = { 'Content-Type': 'application/json' };
       if (signup && state.fp) hdrs['X-Client-FP'] = state.fp;
-      fetch(signup ? '/api/signup' : '/api/login', { method: 'POST', headers: hdrs, body: JSON.stringify({ username: u, password: p }) })
+      if (!signup) {
+        fetch('/api/login', { method: 'POST', headers: hdrs, body: JSON.stringify({ username: u, password: p }) })
+          .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) throw new Error(d.error || 'Request failed'); return d; }); })
+          .then(function (d) { state.user = d.user; renderApp(); loadAll(); })
+          .catch(function (e) { err.textContent = e.message; err.style.display = 'block'; });
+        return;
+      }
+      var cap = document.getElementById('capanswer').value.trim();
+      if (!cap) { err.textContent = t('captcha_ph'); err.style.display = 'block'; return; }
+      fetch('/api/signup/begin', { method: 'POST', headers: hdrs, body: JSON.stringify({ username: u, password: p, captchaId: capId, captcha: cap }) })
         .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) throw new Error(d.error || 'Request failed'); return d; }); })
-        .then(function (d) { state.user = d.user; renderApp(); loadAll(); })
-        .catch(function (e) { err.textContent = e.message; err.style.display = 'block'; });
+        .then(function (d) { showVerify(d); })
+        .catch(function (e) {
+          err.textContent = e.message; err.style.display = 'block';
+          loadCaptcha();
+          var a = document.getElementById('capanswer'); if (a) a.value = '';
+        });
+    }
+
+    function showVerify(d) {
+      var card = document.querySelector('.card');
+      card.innerHTML = brand() +
+        '<div class="sub">' + t('verify_title') + '</div>' +
+        '<div class="verifycode" id="vcode">' + esc(d.code) + '</div>' +
+        '<button class="btn ghost small" id="vcopy">' + ICON.copy + ' ' + t('copy') + '</button>' +
+        '<div class="hint" style="margin-top:14px">' + t('verify_steps') + '</div>' +
+        '<a class="btn" style="margin-top:12px" href="' + esc(d.discord) + '" target="_blank" rel="noopener">' + ICON.link + ' ' + t('verify_join') + '</a>' +
+        '<div class="verifywait" id="vwait">' + t('verify_waiting') + '</div>';
+      var copyBtn = document.getElementById('vcopy');
+      copyBtn.onclick = function () { copyText(d.code); toast(t('copy')); };
+      var started = Date.now();
+      var timer = setInterval(function () {
+        if (Date.now() - started > 15 * 60 * 1000) {
+          clearInterval(timer);
+          var w = document.getElementById('vwait');
+          if (w) w.textContent = t('verify_expired');
+          return;
+        }
+        api('/api/signup/poll?t=' + encodeURIComponent(d.token)).then(function (r) {
+          if (r.status === 'ok') {
+            clearInterval(timer);
+            state.user = r.user;
+            renderApp();
+            loadAll();
+          }
+        }).catch(function () {});
+      }, 2500);
     }
   }
+
   function toast(msg, bad) {
     var wrap = document.querySelector('.toastwrap');
     if (!wrap) { wrap = document.createElement('div'); wrap.className = 'toastwrap'; document.body.appendChild(wrap); }
