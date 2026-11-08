@@ -205,7 +205,7 @@ const STMT_KEYWORDS = {
 
 function luaObfuscate(source, options) {
   const o = Object.assign({
-    strings: true, numbers: true, rename: true, junk: true, wrap: true, hideErrors: false, seed: Date.now()
+    strings: true, numbers: true, rename: true, junk: true, wrap: true, hideErrors: false, seed: Date.now(), layers: 1
   }, options || {});
   const rnd = rngFactory(o.seed || 1);
   const toks = lexLua(source);
@@ -264,6 +264,19 @@ function luaObfuscate(source, options) {
   }
 
   const renameMap = new Array(real.length).fill(null);
+
+  const ridChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  function rid() {
+    for (;;) {
+      const len = 1 + Math.floor(rnd() * 2);
+      let out = '';
+      for (let i = 0; i < len; i++) out += ridChars[Math.floor(rnd() * ridChars.length)];
+      if (usedNames.has(out)) continue;
+      if (LUA_KW[out]) continue;
+      usedNames.add(out);
+      return out;
+    }
+  }
 
   if (o.rename) {
     const stack = [new Map()];
@@ -449,9 +462,10 @@ function luaObfuscate(source, options) {
     return out;
   }
 
+  const sfn = rid();
   function emitString(bin) {
     const idx = poolAdd(bin);
-    return '__S(' + idx + ')';
+    return sfn + '(' + idx + ')';
   }
 
   function numExpr(raw) {
@@ -517,76 +531,147 @@ function luaObfuscate(source, options) {
   let pre = '';
   if (pool.length) {
     const key = Math.floor(rnd() * 200) + 29;
-    pre = 'local __P={' + pool.map(function (s) { return '"' + s + '"'; }).join(',') + '}\n' +
-      'local __K=' + key + '\n' +
-      'local __D=' + DECOY + '\n' +
-      'local __C={}\n' +
-      'local function __S(i)\n' +
-      'if __C[i] then return __C[i] end\n' +
-      'local d=__P[i]\n' +
-      'local n=#d\n' +
-      'local t={}\n' +
-      'for j=1,n do\n' +
-      'local b=d:byte(j)\n' +
-      'local m=(j*__D)%251\n' +
-      'b=(b-m)%256\n' +
-      't[j]=string.char(b)\n' +
-      'end\n' +
-      'local r=table.concat(t)\n' +
-      '__C[i]=r\n' +
-      'return r\n' +
-      'end\n';
+    const vP = rid(), vK = rid(), vD = rid(), vC = rid(), vS = sfn;
+    const vI = rid(), vJ = rid(), vB = rid(), vM = rid(), vT = rid(), vR = rid(), vN = rid();
+    pre = 'local ' + vP + '={' + pool.map(function (s) { return '"' + s + '"'; }).join(',') + '} ' +
+      'local ' + vK + '=' + key + ' ' +
+      'local ' + vD + '=' + DECOY + ' ' +
+      'local ' + vC + '={} ' +
+      'local function ' + vS + '(' + vI + ') ' +
+      'if ' + vC + '[' + vI + '] then return ' + vC + '[' + vI + '] end ' +
+      'local ' + vD + 'x=' + vP + '[' + vI + '] ' +
+      'local ' + vN + '=#' + vD + 'x ' +
+      'local ' + vT + '={} ' +
+      'for ' + vJ + '=1,' + vN + ' do ' +
+      'local ' + vB + '=' + vD + 'x:byte(' + vJ + ') ' +
+      'local ' + vM + '=(' + vJ + '*' + DECOY + ')%251 ' +
+      vB + '=(' + vB + '-' + vM + ')%256 ' +
+      vT + '[' + vJ + ']=string.char(' + vB + ') ' +
+      'end ' +
+      'local ' + vR + '=table.concat(' + vT + ') ' +
+      vC + '[' + vI + ']=' + vR + ' ' +
+      'return ' + vR + ' end ';
   }
 
   let result = pre + body;
 
-  if (o.wrap) result = wrapLoader(result, rnd, o.hideErrors);
+  if (o.wrap) {
+    const layers = Math.max(1, Math.min(3, Number(o.layers) || 1));
+    for (let li = 0; li < layers; li++) result = packBlob(result, rnd, o.hideErrors, rid);
+  }
   return { code: result, stats: { strings: pool.length, original: source.length, output: result.length } };
 }
 
-function wrapLoader(src, rnd, hideErrors) {
-  const key = Math.floor(rnd() * 200) + 17;
+const B62 = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+function packBlob(src, rnd, hideErrors, rid) {
   const bytes = toByteString(src);
-  let enc = '';
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes.charCodeAt(i) & 255;
-    const m = ((i + 1) * key) % 251;
-    enc += '\\' + String((b + m) % 256).padStart(3, '0');
+  const n = bytes.length;
+
+  const chunkCount = Math.max(2, Math.min(6, 2 + Math.floor(rnd() * 4)));
+  const lens = [];
+  let remain = n;
+  for (let c = 0; c < chunkCount - 1; c++) {
+    const slots = chunkCount - c;
+    const maxLen = Math.max(1, Math.floor(remain / slots) * 2);
+    const len = Math.max(1, Math.min(remain - (slots - 1), 1 + Math.floor(rnd() * maxLen)));
+    lens.push(len);
+    remain -= len;
   }
-  const j1 = Math.floor(rnd() * 9000) + 1000;
-  const j2 = Math.floor(rnd() * 9000) + 1000;
-  const j3 = Math.floor(rnd() * 9000) + 1000;
-  const lines = [
-    'local __d="' + enc + '"',
-    'local __k=' + key,
-    'local __n=#__d',
-    'local __t={}',
-    'local __z=' + j1,
-    'local __y=' + j2,
-    'local __x=' + j3,
-    'for __i=1,__n do',
-    'local __b=__d:byte(__i)',
-    'local __m=(__i*__k)%251',
-    '__t[__i]=string.char((__b-__m)%256)',
-    'end',
-    'if (__z-__y) ~= ' + (j1 - j2) + ' then return end',
-    'local __s=table.concat(__t)',
-    'if #__s < 1 then return end',
-    'if __x ~= ' + j3 + ' then return end',
-    'local __ld=loadstring or load'
-  ];
+  lens.push(Math.max(0, remain));
+
+  const chunks = [];
+  let off = 0;
+  for (let c = 0; c < chunkCount; c++) {
+    const len = lens[c];
+    const k1 = 1 + Math.floor(rnd() * 251);
+    const k2 = Math.floor(rnd() * 256);
+    const arr = [];
+    for (let i = 0; i < len; i++) {
+      const b = bytes.charCodeAt(off + i) & 255;
+      arr.push((b + (((i + 1) * k1 + k2) % 256)) % 256);
+    }
+    off += len;
+    if (arr.length % 2) arr.push(0);
+    let blob = '';
+    for (let i = 0; i < arr.length; i += 2) {
+      const v = arr[i] * 256 + arr[i + 1];
+      blob += B62[Math.floor(v / 3844)] + B62[Math.floor((v % 3844) / 62)] + B62[v % 62];
+    }
+    chunks.push({ k1: k1, k2: k2, len: len, blob: blob });
+  }
+
+  const order = [];
+  for (let i = 0; i < chunkCount; i++) order.push(i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    const t = order[i]; order[i] = order[j]; order[j] = t;
+  }
+
+  let chk = n % 65521;
+  for (let i = 0; i < n; i++) chk = (chk + (bytes.charCodeAt(i) & 255)) % 65521;
+  const jx = Math.floor(rnd() * 9000) + 1000, jy = Math.floor(rnd() * 9000) + 1000;
+
+  const A = rid(), M = rid(), BL = rid(), LEN = rid(), K1 = rid(), K2 = rid();
+  const ORD = rid(), OUT = rid(), P = rid(), I = rid(), C = rid();
+  const V = rid(), HX = rid(), B1 = rid(), B2 = rid(), Q = rid(), N = rid(), S = rid();
+  const LD = rid(), FN = rid(), ER = rid(), OK = rid(), RES = rid();
+
+  const blobTable = order.map(function (o) { return '"' + chunks[o].blob + '"'; }).join(',');
+  const lenTable = order.map(function (o) { return chunks[o].len; }).join(',');
+  const k1Table = order.map(function (o) { return chunks[o].k1; }).join(',');
+  const k2Table = order.map(function (o) { return chunks[o].k2; }).join(',');
+
+  const parts = [];
+  const abcNums = B62.split('').map(function (c) { return c.charCodeAt(0); }).join(',');
+  parts.push('local ' + A + '=string.char(' + abcNums + ')');
+  parts.push('local ' + M + '={}');
+  parts.push('for ' + I + '=1,#' + A + ' do ' + M + '[' + A + ':sub(' + I + ',' + I + ')]=' + I + '-1 end');
+  parts.push('local ' + BL + '={' + blobTable + '}');
+  parts.push('local ' + LEN + '={' + lenTable + '}');
+  parts.push('local ' + K1 + '={' + k1Table + '}');
+  parts.push('local ' + K2 + '={' + k2Table + '}');
+  parts.push('local ' + ORD + '={' + order.map(function (v) { return v + 1; }).join(',') + '}');
+  parts.push('local ' + OUT + '={}');
+  parts.push('for ' + C + '=1,#' + BL + ' do');
+  parts.push('local ' + V + '=' + BL + '[' + C + ']');
+  parts.push('local ' + I + '=1');
+  parts.push('local ' + P + '=0');
+  parts.push('local ' + Q + '={}');
+  parts.push('while ' + I + '<=#' + V + ' do');
+  const ch0 = M + '[' + V + ':sub(' + I + ',' + I + ')]';
+  const ch1 = M + '[' + V + ':sub(' + I + '+1,' + I + '+1)]';
+  const ch2 = M + '[' + V + ':sub(' + I + '+2,' + I + '+2)]';
+  parts.push('local ' + HX + '=' + ch0 + '*3844+' + ch1 + '*62+' + ch2);
+  parts.push('local ' + B1 + '=math.floor(' + HX + '/256)');
+  parts.push('local ' + B2 + '=' + HX + '%256');
+  parts.push(P + '=' + P + '+1 ' + Q + '[' + P + ']=(' + B1 + '-((' + P + '*' + K1 + '[' + C + ']+' + K2 + '[' + C + '])%256))%256');
+  parts.push(P + '=' + P + '+1 ' + Q + '[' + P + ']=(' + B2 + '-((' + P + '*' + K1 + '[' + C + ']+' + K2 + '[' + C + '])%256))%256');
+  parts.push(I + '=' + I + '+3 end');
+  parts.push('local ' + N + '={}');
+  parts.push('for ' + I + '=1,' + LEN + '[' + C + '] do ' + N + '[' + I + ']=string.char(' + Q + '[' + I + ']) end');
+  parts.push(OUT + '[' + ORD + '[' + C + ']]=table.concat(' + N + ')');
+  parts.push('end');
+  parts.push('local ' + S + '=table.concat(' + OUT + ')');
+  parts.push('if #' + S + '~=' + n + ' then return end');
+  parts.push('local ' + Q + '=' + (n % 65521) + ' for ' + I + '=1,#' + S + ' do ' + Q + '=(' + Q + '+string.byte(' + S + ',' + I + '))%65521 end');
+  parts.push('if ' + Q + '~=' + chk + ' then return end');
+  parts.push('if (' + jx + '-' + jy + ')~=' + (jx - jy) + ' then return end');
+  parts.push('local ' + LD + '=nil');
+  parts.push('local ' + LD + 'x=getfenv and getfenv() or _ENV');
+  parts.push(LD + '=' + LD + 'x[string.char(108,111,97,100,115,116,114,105,110,103)] or ' + LD + 'x[string.char(108,111,97,100)]');
   if (hideErrors) {
-    lines.push('local __fn,__er=pcall(function() return __ld(__s,"@") end)');
-    lines.push('if not __fn or not __er then return end');
-    lines.push('local __ok,__res=pcall(__er)');
-    lines.push('if not __ok then return end');
-    lines.push('return __res');
+    parts.push('local ' + FN + ',' + ER + '=pcall(function() return ' + LD + '(' + S + ',"@") end)');
+    parts.push('if not ' + FN + ' or not ' + ER + ' then return end');
+    parts.push('local ' + OK + ',' + RES + '=pcall(' + ER + ')');
+    parts.push('if not ' + OK + ' then return end');
+    parts.push('return ' + RES);
   } else {
-    lines.push('local __fn,__er=__ld(__s,"@")');
-    lines.push('if not __fn then return end');
-    lines.push('return __fn()');
+    parts.push('local ' + FN + ',' + ER + '=' + LD + '(' + S + ',"@")');
+    parts.push('if not ' + FN + ' then return end');
+    parts.push('return ' + FN + '()');
   }
-  return lines.join('\n');
+  return parts.join(' ');
 }
 
 module.exports = { luaObfuscate: luaObfuscate, lexLua: lexLua };
