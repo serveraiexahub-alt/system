@@ -207,9 +207,9 @@ const STMT_KEYWORDS = {
 const LEVELS = {
   1: { layers: 1, junk: 1,   decoys: 6,   junkMul: 1,   strings: true, numbers: true, rename: true },
   2: { layers: 2, junk: 2.5, decoys: 14,  junkMul: 2.5, strings: true, numbers: true, rename: true },
-  3: { layers: 3, junk: 5,   decoys: 40,  junkMul: 5,   strings: true, numbers: true, rename: true },
-  4: { layers: 3, junk: 7.5, decoys: 80,  junkMul: 7.5, strings: true, numbers: true, rename: true },
-  5: { layers: 4, junk: 10,  decoys: 140, junkMul: 10,  strings: true, numbers: true, rename: true }
+  3: { layers: 3, junk: 8,   decoys: 60,  junkMul: 8,   strings: true, numbers: true, rename: true, fakes: 1 },
+  4: { layers: 3, junk: 15,  decoys: 120, junkMul: 15,  strings: true, numbers: true, rename: true, fakes: 2 },
+  5: { layers: 4, junk: 25,  decoys: 200, junkMul: 25,  strings: true, numbers: true, rename: true, fakes: 3 }
 };
 
 function luaObfuscate(source, options) {
@@ -218,7 +218,7 @@ function luaObfuscate(source, options) {
   const o = Object.assign({
     strings: lv.strings, numbers: lv.numbers, rename: lv.rename,
     junk: true, wrap: true, hideErrors: true, seed: Date.now(),
-    layers: lv.layers, junkSize: lv.junk, decoys: lv.decoys, junkMul: lv.junkMul, remote: false
+    layers: lv.layers, junkSize: lv.junk, decoys: lv.decoys, junkMul: lv.junkMul, fakes: lv.fakes || 0, remote: false
   }, opts);
   const rnd = rngFactory(o.seed || 1);
   const toks = lexLua(source);
@@ -584,7 +584,14 @@ function luaObfuscate(source, options) {
   let result = pre + body;
 
   if (o.wrap) {
-    const layers = Math.max(1, Math.min(8, Number(o.layers) || 1));
+    let layers = Math.max(1, Math.min(8, Number(o.layers) || 1));
+    const srcBytes = source.length;
+    let budget = 8000000;
+    for (let li = 0; li < layers; li++) {
+      const need = Math.ceil(srcBytes * (o.remote ? 3 : 1.7));
+      if (need > budget) { layers = Math.max(1, li); break; }
+      budget -= need;
+    }
     let prev = -1;
     for (let li = 0; li < layers; li++) {
       const packed = packBlob(result, rnd, o.hideErrors, rid, prev);
@@ -597,17 +604,32 @@ function luaObfuscate(source, options) {
   const minDecoys = Math.max(0, Math.min(400, Number(o.decoys) || 0));
   if (mul > 0 || minDecoys > 0) {
     const baseLen = String(source).length;
-    const targetChars = Math.min(9000000, Math.floor(baseLen * mul));
+    const room = Math.max(0, 8500000 - result.length);
+    const targetChars = Math.min(room, Math.floor(baseLen * mul));
     const built = buildJunkToSize(rnd, rid, targetChars, minDecoys);
     if (built.code) {
-      const st = Math.floor(rnd() * 4);
       const rn = rid();
+      const st = Math.floor(rnd() * 3);
       let wrap;
-      if (st === 0) wrap = ' return (function() ' + result + ' end)()';
-      else if (st === 1) wrap = ' local ' + rn + '=function() ' + result + ' end return ' + rn + '()';
-      else if (st === 2) wrap = ' local ' + rn + '=function() ' + result + ' end if ' + rn + ' then return ' + rn + '() end';
+      if (st === 0) wrap = ' local ' + rn + '=function() ' + result + ' end return ' + rn + '()';
+      else if (st === 1) wrap = ' local ' + rn + '=function() ' + result + ' end if ' + rn + ' then return ' + rn + '() end';
       else wrap = ' local ' + rn + '=function() ' + result + ' end return ' + rn + ' and ' + rn + '()';
       result = built.code + wrap;
+
+      let fakeCount = Math.max(0, Math.min(4, Number(o.fakes) || 0));
+      while (fakeCount > 0 && result.length * (fakeCount + 1) > 8500000) fakeCount--;
+      for (let fi = 0; fi < fakeCount; fi++) {
+        const decoySrc = fakeSource(rnd, rid);
+        let decoy = decoySrc;
+        let prevS = -1;
+        const dl = Math.max(1, Math.min(4, Number(o.layers) || 1) - 1);
+        for (let li = 0; li < dl; li++) {
+          const p2 = packBlob(decoy, rnd, false, rid, prevS);
+          decoy = p2.code;
+          prevS = p2.scheme;
+        }
+        result = falseGate(rnd, rid) + decoy + ' end ' + result;
+      }
     }
     var decoyCount = built.count;
     var junkChars = built.code.length;
@@ -736,6 +758,28 @@ function buildRemotePre(rnd, rid, url, keyPair, sfn) {
   return parts.join(' ') + ' ';
 }
 
+
+
+
+function falseGate(rnd, rid) {
+  const x = rid(), y = rid(), z = rid();
+  const a = 2 + Math.floor(rnd() * 50);
+  const b = 2 + Math.floor(rnd() * 50);
+  const c = a * b + 1;
+  return 'local ' + x + '=' + a + ' local ' + y + '=' + b + ' local ' + z + '=' + c
+    + ' if (' + x + '*' + y + '-(' + z + '-1))~=0 then ';
+}
+
+function fakeSource(rnd, rid) {
+  const a = rid(), b = rid(), c = rid(), t = rid();
+  const n1 = 20 + Math.floor(rnd() * 900);
+  const n2 = 20 + Math.floor(rnd() * 900);
+  const s1 = rid();
+  return 'local ' + a + '=' + n1 + ' local ' + b + '=' + n2 + ' local ' + t + '={} '
+    + 'for ' + c + '=1,' + a + ' do ' + t + '[' + c + ']=(' + c + '*' + b + ')%' + (n1 + 7) + ' end '
+    + 'local ' + s1 + '="' + rid() + '" '
+    + 'return ' + a + ',' + b + ',' + s1;
+}
 
 function numLit(v, rnd) {
   const a = 1 + Math.floor(rnd() * 4000);
