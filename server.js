@@ -3,6 +3,28 @@ const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+
+function loadEnvFile(file) {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const p = file || path.join(__dirname, '.env');
+    if (!fs.existsSync(p)) return;
+    const lines = fs.readFileSync(p, 'utf8').split(/\r?\n/);
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t || t[0] === '#') continue;
+      const i = t.indexOf('=');
+      if (i < 0) continue;
+      const k = t.slice(0, i).trim();
+      let v = t.slice(i + 1).trim();
+      if ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'")) v = v.slice(1, -1);
+      if (!process.env[k]) process.env[k] = v;
+    }
+  } catch (e) {}
+}
+loadEnvFile();
+
 const { luaObfuscate } = require('./obf.js');
 const { makeCaptcha } = require('./captcha.js');
 

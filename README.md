@@ -16,7 +16,11 @@
 
 ```bash
 npm install
+cp .env.example .env
+nano .env          # ใส่ค่าให้ครบ
 ```
+
+ทั้ง `server.js` และ `bot.js` จะอ่าน `.env` ให้อัตโนมัติ (ไม่ต้อง export ทีละตัว)
 
 ## ตัวแปรสภาพแวดล้อม (สำคัญ)
 
@@ -52,6 +56,8 @@ node server.js
 ```bash
 npm run bot
 ```
+
+บอทอ่านค่า `DISCORD_TOKEN`, `BOT_SECRET`, `WEB_URL`, `DISCORD_CHANNEL_ID` จาก `.env`
 
 ต้องตั้งค่าเพิ่ม:
 
