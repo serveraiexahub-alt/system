@@ -60,6 +60,7 @@ function ensureDb() {
   db.signupLog = db.signupLog || [];
   db.ipReg = db.ipReg || {};
   db.fpReg = db.fpReg || {};
+  db.vaults = db.vaults || {};
   Object.values(db.users).forEach(function (u) {
     if (typeof u.nick !== 'string') u.nick = '';
     if (typeof u.avatar !== 'string') u.avatar = '';
@@ -346,28 +347,80 @@ app.put('/api/profile', auth, function (req, res) {
   res.json({ ok: true, user: { id: u.id, username: u.username, nick: u.nick || '', avatar: u.avatar || '' } });
 });
 
+function baseUrl(req) {
+  return (req.headers['x-forwarded-proto'] || req.protocol) + '://' + req.headers.host;
+}
+
+app.get('/api/vault/:id', function (req, res) {
+  const v = ownGet(db.vaults || {}, req.params.id);
+  if (!v) return res.status(404).send('');
+  if (String(req.query.k || '') !== v.token) return res.status(403).send('');
+  if (Date.now() > v.expires) return res.status(410).send('');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  v.hits = (v.hits || 0) + 1;
+  res.send(v.data);
+});
+
 app.post('/api/obfuscate', auth, function (req, res) {
   const body = req.body || {};
   const code = String(body.code == null ? '' : body.code);
   const fileName = String(body.name || '').trim();
   if (!code.trim()) return res.status(400).json({ error: 'Code is empty' });
   if (code.length > MAX_CODE) return res.status(413).json({ error: 'Code exceeds 2 MB limit' });
+  const level = Math.max(1, Math.min(5, Number(body.level) || 3));
+  const remote = body.remote === true;
+  let keyPair = null;
+  let vaultId = null;
+  let vaultToken = null;
+  let vaultUrl = null;
+  if (remote) {
+    keyPair = { k1: 1 + Math.floor(Math.random() * 200), k2: Math.floor(Math.random() * 250) };
+    vaultId = id(10);
+    vaultToken = id(16).replace(/[^A-Za-z0-9]/g, '').slice(0, 22) || id(8);
+    vaultUrl = baseUrl(req) + '/api/vault/' + vaultId + '?k=' + encodeURIComponent(vaultToken);
+  }
   let out;
   try {
     out = luaObfuscate(code, {
       seed: Math.floor(Math.random() * 2147483646) + 1,
-      rename: body.rename !== false,
-      strings: body.strings !== false,
-      numbers: body.numbers !== false,
-      junk: body.junk !== false,
-      wrap: body.wrap !== false,
-      hideErrors: body.hideErrors === true,
-      layers: Math.max(1, Math.min(3, Number(body.layers) || 1))
+      level: level,
+      remote: remote,
+      remoteKey: keyPair,
+      remoteUrl: vaultUrl
     });
   } catch (e) {
     return res.status(500).json({ error: 'Obfuscation failed: ' + e.message });
   }
-  const result = { ok: true, code: out.code, stats: out.stats };
+
+  let finalCode = out.code;
+  if (remote && out.vault && out.vault.length) {
+    const token = vaultToken;
+    const bytes = [];
+    out.vault.forEach(function (str) {
+      const len = str.length;
+      bytes.push((len >> 8) & 255, len & 255);
+      for (let i = 0; i < len; i++) bytes.push(str.charCodeAt(i) & 255);
+    });
+    const k1 = keyPair.k1, k2 = keyPair.k2;
+    const enc = bytes.map(function (b, i) { return (b + (((i + 1) * k1 + k2) % 256)) % 256; });
+    if (enc.length % 2) enc.push(0);
+    const A = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let blob = '';
+    for (let i = 0; i < enc.length; i += 2) {
+      const v = enc[i] * 256 + enc[i + 1];
+      blob += A[Math.floor(v / 3844)] + A[Math.floor((v % 3844) / 62)] + A[v % 62];
+    }
+    db.vaults = db.vaults || {};
+    db.vaults[vaultId] = {
+      id: vaultId, owner: req.user.id, token: token, data: blob,
+      created: Date.now(), expires: Date.now() + 365 * 24 * 3600 * 1000, hits: 0
+    };
+    save();
+  }
+
+  const result = { ok: true, code: finalCode, stats: out.stats, level: level, remote: remote };
   if (body.save === true) {
     if (!fileName) return res.status(400).json({ error: 'File name is required to save' });
     if (fileName.length > MAX_NAME) return res.status(400).json({ error: 'File name too long' });
@@ -376,9 +429,9 @@ app.post('/api/obfuscate', auth, function (req, res) {
     const folder = body.folder && ownGet(db.folders, String(body.folder)) ? String(body.folder) : null;
     const vis = body.visibility === 'private' ? 'private' : 'public';
     const f = {
-      id: fid, owner: req.user.id, name: fileName, code: out.code,
+      id: fid, owner: req.user.id, name: fileName, code: finalCode,
       created: now, updated: now, shares: [], invites: [],
-      history: [{ ts: now, charsAdded: out.code.length, charsRemoved: 0, linesAdded: out.code.split('\n').length, linesRemoved: 0, total: out.code.length }],
+      history: [{ ts: now, charsAdded: finalCode.length, charsRemoved: 0, linesAdded: finalCode.split('\n').length, linesRemoved: 0, total: finalCode.length }],
       folder: folder, visibility: vis
     };
     if (folder) {
@@ -1035,8 +1088,8 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     copy2: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>'
   };
   var T = {
-    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', obf:'ปกปิดโค้ด Lua', obf_title:'Lua Obfuscator', obf_input:'โค้ด Lua', obf_input_ph:'วางโค้ด Lua ที่นี่ หรือกดอัปโหลดไฟล์', obf_pick:'อัปโหลดไฟล์', obf_no_file:'ยังไม่ได้เลือกไฟล์', obf_run:'ปกปิด', obf_running:'กำลังปกปิด...', obf_output:'ผลลัพธ์', obf_copy:'คัดลอกผลลัพธ์', obf_save:'สร้างไฟล์จากผลลัพธ์', obf_name:'ชื่อไฟล์', obf_name_ph:'obfuscated', obf_options:'ตัวเลือก', obf_opt_rename:'เปลี่ยนชื่อตัวแปร', obf_opt_strings:'เข้ารหัสสตริง', obf_opt_numbers:'แปลงตัวเลข', obf_opt_junk:'ใส่โค้ดหลอก', obf_opt_wrap:'ห่อด้วย loader', obf_opt_hide:'ซ่อน error', obf_done:'ปกปิดเสร็จแล้ว', obf_empty:'ใส่โค้ดก่อน', obf_saved:'สร้างไฟล์แล้ว', obf_stats:'ผลลัพธ์', obf_strong:'โหมดแน่นหนา', obf_clear:'ล้าง', obf_layers:'จำนวนชั้นป้องกัน', obf_layer1:'1 ชั้น (เร็วสุด)', obf_layer2:'2 ชั้น (แนะนำ)', obf_layer3:'3 ชั้น (แน่นสุด)', obf_layers_hint:'ยิ่งชั้นเยอะ ยิ่งแกะยาก แต่โหลดช้าลงเล็กน้อย' },
-    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', obf:'Protect Lua code', obf_title:'Lua Obfuscator', obf_input:'Lua code', obf_input_ph:'Paste Lua code here, or upload a file', obf_pick:'Upload file', obf_no_file:'No file selected', obf_run:'Protect', obf_running:'Protecting...', obf_output:'Output', obf_copy:'Copy output', obf_save:'Create file from output', obf_name:'File name', obf_name_ph:'obfuscated', obf_options:'Options', obf_opt_rename:'Rename variables', obf_opt_strings:'Encrypt strings', obf_opt_numbers:'Transform numbers', obf_opt_junk:'Insert decoy code', obf_opt_wrap:'Wrap in loader', obf_opt_hide:'Hide errors', obf_done:'Done', obf_empty:'Enter code first', obf_saved:'File created', obf_stats:'Result', obf_strong:'Strong mode', obf_clear:'Clear', obf_layers:'Protection layers', obf_layer1:'1 layer (fastest)', obf_layer2:'2 layers (recommended)', obf_layer3:'3 layers (max)', obf_layers_hint:'More layers = harder to crack, slightly slower to load' }
+    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', obf:'ปกปิดโค้ด Lua', obf_title:'Lua Obfuscator', obf_input:'โค้ด Lua', obf_input_ph:'วางโค้ด Lua ที่นี่ หรือกดอัปโหลดไฟล์', obf_pick:'อัปโหลดไฟล์', obf_no_file:'ยังไม่ได้เลือกไฟล์', obf_run:'ปกปิด', obf_running:'กำลังปกปิด...', obf_output:'ผลลัพธ์', obf_copy:'คัดลอกผลลัพธ์', obf_save:'สร้างไฟล์จากผลลัพธ์', obf_name:'ชื่อไฟล์', obf_name_ph:'obfuscated', obf_options:'ตัวเลือก', obf_opt_rename:'เปลี่ยนชื่อตัวแปร', obf_opt_strings:'เข้ารหัสสตริง', obf_opt_numbers:'แปลงตัวเลข', obf_opt_junk:'ใส่โค้ดหลอก', obf_opt_wrap:'ห่อด้วย loader', obf_opt_hide:'ซ่อน error', obf_done:'ปกปิดเสร็จแล้ว', obf_empty:'ใส่โค้ดก่อน', obf_saved:'สร้างไฟล์แล้ว', obf_stats:'ผลลัพธ์', obf_strong:'โหมดแน่นหนา', obf_clear:'ล้าง', obf_level:'ระดับความยาก', obf_lv1:'1 · เบา', obf_lv2:'2 · กลาง', obf_lv3:'3 · หนัก', obf_lv4:'4 · โหด', obf_lv5:'5 · สุดโหด', obf_lv1_hint:'เร็วสุด ไฟล์เล็ก แต่แกะง่าย', obf_lv2_hint:'สมดุล ไฟล์กลางๆ', obf_lv3_hint:'แนะนำ — แกะยาก ไฟล์ใหญ่ขึ้น', obf_lv4_hint:'โหด 3 ชั้น + ขยะเยอะ', obf_lv5_hint:'สุดโหด ไฟล์ใหญ่หลายเท่า แกะนานมาก', obf_remote:'เก็บตัวแปรไว้บนเว็บ', obf_remote_on:'เปิด (สคริปต์จะดึงค่าตอนรัน)', obf_remote_hint:'ตัวแปรจะไม่อยู่ในไฟล์ — ดึงจากเซิร์ฟเวอร์ตอนรัน ต้องใช้ executor ที่มี game:HttpGet' },
+    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', obf:'Protect Lua code', obf_title:'Lua Obfuscator', obf_input:'Lua code', obf_input_ph:'Paste Lua code here, or upload a file', obf_pick:'Upload file', obf_no_file:'No file selected', obf_run:'Protect', obf_running:'Protecting...', obf_output:'Output', obf_copy:'Copy output', obf_save:'Create file from output', obf_name:'File name', obf_name_ph:'obfuscated', obf_options:'Options', obf_opt_rename:'Rename variables', obf_opt_strings:'Encrypt strings', obf_opt_numbers:'Transform numbers', obf_opt_junk:'Insert decoy code', obf_opt_wrap:'Wrap in loader', obf_opt_hide:'Hide errors', obf_done:'Done', obf_empty:'Enter code first', obf_saved:'File created', obf_stats:'Result', obf_strong:'Strong mode', obf_clear:'Clear', obf_level:'Difficulty', obf_lv1:'1 · Light', obf_lv2:'2 · Medium', obf_lv3:'3 · Heavy', obf_lv4:'4 · Brutal', obf_lv5:'5 · Insane', obf_lv1_hint:'Fastest, smallest file, easy to crack', obf_lv2_hint:'Balanced, medium size', obf_lv3_hint:'Recommended — hard to crack', obf_lv4_hint:'Brutal: 3 layers + heavy junk', obf_lv5_hint:'Insane: huge file, very slow to crack', obf_remote:'Remote variables', obf_remote_on:'Enable (script fetches values at runtime)', obf_remote_hint:'Variables leave the file and load from the server at runtime. Requires an executor with game:HttpGet' }
   };
   var LANG = localStorage.getItem('lang') || 'th';
   function t(k) { var d = T[LANG] || T.th; return d[k] != null ? d[k] : (T.th[k] != null ? T.th[k] : k); }
@@ -1669,20 +1722,17 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<div class="obfrow" style="margin-top:8px"><button class="btn ghost small" id="obfpick" type="button">' + ICON.file + ' ' + t('obf_pick') + '</button>' +
       '<span class="obfstat" id="obffname">' + t('obf_no_file') + '</span></div>' +
       '<input type="file" id="obffile" accept=".lua,.txt,text/plain" style="display:none"></div>' +
-      '<div class="field"><label>' + ICON.settings + ' ' + t('obf_options') + '</label><div class="obfopts">' +
-      '<label class="chk"><input type="checkbox" id="obfRename" checked> ' + t('obf_opt_rename') + '</label>' +
-      '<label class="chk"><input type="checkbox" id="obfStrings" checked> ' + t('obf_opt_strings') + '</label>' +
-      '<label class="chk"><input type="checkbox" id="obfNumbers" checked> ' + t('obf_opt_numbers') + '</label>' +
-      '<label class="chk"><input type="checkbox" id="obfJunk" checked> ' + t('obf_opt_junk') + '</label>' +
-      '<label class="chk"><input type="checkbox" id="obfWrap" checked> ' + t('obf_opt_wrap') + '</label>' +
-      '<label class="chk"><input type="checkbox" id="obfHide"> ' + t('obf_opt_hide') + '</label>' +
-      '</div></div>' +
-      '<div class="field"><label>' + ICON.shield + ' ' + t('obf_layers') + '</label>' +
+      '<div class="field"><label>' + ICON.shield + ' ' + t('obf_level') + '</label>' +
       picker('obflayerpick', [
-        { value: '1', label: t('obf_layer1') },
-        { value: '2', label: t('obf_layer2') },
-        { value: '3', label: t('obf_layer3') }
-      ], '2', t('obf_layers')) + '<div class="hint">' + t('obf_layers_hint') + '</div></div>' +
+        { value: '1', label: t('obf_lv1') },
+        { value: '2', label: t('obf_lv2') },
+        { value: '3', label: t('obf_lv3') },
+        { value: '4', label: t('obf_lv4') },
+        { value: '5', label: t('obf_lv5') }
+      ], '3', t('obf_level')) + '<div class="hint" id="obflvhint">' + t('obf_lv3_hint') + '</div></div>' +
+      '<div class="field"><label>' + ICON.settings + ' ' + t('obf_remote') + '</label>' +
+      '<label class="chk"><input type="checkbox" id="obfRemote"> ' + t('obf_remote_on') + '</label>' +
+      '<div class="hint">' + t('obf_remote_hint') + '</div></div>' +
       '<div class="obfrow"><span class="obfstat" id="obfstat"></span>' +
       '<div style="display:flex;gap:8px"><button class="btn ghost small" id="obfclear">' + t('obf_clear') + '</button>' +
       '<button class="btn small" id="obfrun">' + ICON.lock + ' ' + t('obf_run') + '</button></div></div>' +
@@ -1694,7 +1744,12 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     document.body.appendChild(overlay);
     overlay.querySelector('#obfclose').onclick = function () { overlay.remove(); };
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
-    bindPicker(overlay, 'obflayerpick');
+    bindPicker(overlay, 'obflayerpick', function (v) {
+      var h = overlay.querySelector('#obflvhint');
+      if (!h) return;
+      var m = { '1': 'obf_lv1_hint', '2': 'obf_lv2_hint', '3': 'obf_lv3_hint', '4': 'obf_lv4_hint', '5': 'obf_lv5_hint' };
+      h.textContent = t(m[v] || 'obf_lv3_hint');
+    });
     var inEl = overlay.querySelector('#obfin');
     var outEl = overlay.querySelector('#obfout');
     var statEl = overlay.querySelector('#obfstat');
@@ -1718,17 +1773,12 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       btn.disabled = true; statEl.textContent = t('obf_running');
       api('/api/obfuscate', { method: 'POST', body: {
         code: code,
-        rename: overlay.querySelector('#obfRename').checked,
-        strings: overlay.querySelector('#obfStrings').checked,
-        numbers: overlay.querySelector('#obfNumbers').checked,
-        junk: overlay.querySelector('#obfJunk').checked,
-        wrap: overlay.querySelector('#obfWrap').checked,
-        hideErrors: overlay.querySelector('#obfHide').checked,
-        layers: Number(pickerVal(overlay, 'obflayerpick')) || 2
+        level: Number(pickerVal(overlay, 'obflayerpick')) || 3,
+        remote: overlay.querySelector('#obfRemote').checked
       } }).then(function (d) {
         last = d.code;
         outEl.textContent = d.code;
-        statEl.textContent = t('obf_stats') + ': ' + d.stats.original + ' -> ' + d.stats.output + ' B · ' + d.stats.strings + ' str';
+        statEl.textContent = t('obf_stats') + ': ' + d.stats.original + ' -> ' + d.stats.output + ' B · L' + (d.level || 3) + (d.remote ? ' · remote' : '') + ' · ' + (d.stats.decoys || 0) + ' decoy';
         toast(t('obf_done'));
       }).catch(function (e) { toast(e.message, true); statEl.textContent = ''; })
         .then(function () { btn.disabled = false; });
@@ -1752,13 +1802,8 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
         if (!nm) { toast(t('obf_name'), true); return; }
         api('/api/obfuscate', { method: 'POST', body: {
           code: inEl.value, name: nm, save: true,
-          rename: overlay.querySelector('#obfRename').checked,
-          strings: overlay.querySelector('#obfStrings').checked,
-          numbers: overlay.querySelector('#obfNumbers').checked,
-          junk: overlay.querySelector('#obfJunk').checked,
-          wrap: overlay.querySelector('#obfWrap').checked,
-          hideErrors: overlay.querySelector('#obfHide').checked,
-          layers: Number(pickerVal(overlay, 'obflayerpick')) || 2
+          level: Number(pickerVal(overlay, 'obflayerpick')) || 3,
+          remote: overlay.querySelector('#obfRemote').checked
         } }).then(function (d) {
           overlay2.remove();
           toast(t('obf_saved'));

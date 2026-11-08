@@ -203,10 +203,22 @@ const STMT_KEYWORDS = {
   'function': 1, 'repeat': 1, 'break': 1, 'goto': 1, 'until': 1, 'else': 1, 'elseif': 1
 };
 
+const LEVELS = {
+  1: { layers: 1, junk: 8, decoys: 6, strings: true,  numbers: true,  rename: true  },
+  2: { layers: 2, junk: 20, decoys: 14, strings: true,  numbers: true,  rename: true  },
+  3: { layers: 2, junk: 40, decoys: 28, strings: true,  numbers: true,  rename: true  },
+  4: { layers: 3, junk: 80, decoys: 55, strings: true,  numbers: true,  rename: true  },
+  5: { layers: 3, junk: 160, decoys: 110, strings: true, numbers: true,  rename: true  }
+};
+
 function luaObfuscate(source, options) {
+  const opts = options || {};
+  const lv = LEVELS[Math.max(1, Math.min(5, Number(opts.level) || 3))];
   const o = Object.assign({
-    strings: true, numbers: true, rename: true, junk: true, wrap: true, hideErrors: false, seed: Date.now(), layers: 1
-  }, options || {});
+    strings: lv.strings, numbers: lv.numbers, rename: lv.rename,
+    junk: true, wrap: true, hideErrors: true, seed: Date.now(),
+    layers: lv.layers, junkSize: lv.junk, decoys: lv.decoys, remote: false
+  }, opts);
   const rnd = rngFactory(o.seed || 1);
   const toks = lexLua(source);
   const real = toks.filter(function (x) { return x.t !== 'nl'; });
@@ -430,11 +442,13 @@ function luaObfuscate(source, options) {
   }
 
   const pool = [];
+  const poolRaw = [];
   const poolIndex = new Map();
   function poolAdd(bin) {
     const enc = luaEncodeBytes(bin);
     if (poolIndex.has(enc)) return poolIndex.get(enc);
     pool.push(enc);
+    poolRaw.push(toByteString(bin));
     const idx = pool.length;
     poolIndex.set(enc, idx);
     return idx;
@@ -523,13 +537,17 @@ function luaObfuscate(source, options) {
       body += needSpace ? ' ' : (rnd() < 0.06 ? ' ' : '');
     }
     body += outTok[i];
-    if (o.junk && rnd() < 0.02 && /^(then|do|else|repeat)$/.test(outTok[i])) {
+    if (o.junk && rnd() < 0.08 && /^(then|do|else|repeat)$/.test(outTok[i])) {
       body += ' local ' + makeName() + '=(' + (Math.floor(rnd() * 1000) + 1) + '-' + (Math.floor(rnd() * 500)) + ')';
     }
   }
 
   let pre = '';
-  if (pool.length) {
+  let vault = null;
+  if (o.remote && pool.length) {
+    vault = poolRaw.slice();
+    pre = buildRemotePre(rnd, rid, o.remoteUrl || '__VAULT_URL__', o.remoteKey, sfn);
+  } else if (pool.length) {
     const key = Math.floor(rnd() * 200) + 29;
     const vP = rid(), vK = rid(), vD = rid(), vC = rid(), vS = sfn;
     const vI = rid(), vJ = rid(), vB = rid(), vM = rid(), vT = rid(), vR = rid(), vN = rid();
@@ -559,7 +577,102 @@ function luaObfuscate(source, options) {
     const layers = Math.max(1, Math.min(3, Number(o.layers) || 1));
     for (let li = 0; li < layers; li++) result = packBlob(result, rnd, o.hideErrors, rid);
   }
-  return { code: result, stats: { strings: pool.length, original: source.length, output: result.length } };
+
+  const decoyCount = Math.max(0, Math.min(400, Number(o.decoys) || 0));
+  if (decoyCount > 0) {
+    const fns = [];
+    const names = [];
+    for (let i = 0; i < decoyCount; i++) names.push(rid());
+    const junk = buildJunk(rnd, rid, decoyCount);
+    for (let i = 0; i < names.length; i++) fns.push(names[i]);
+    const before = buildJunkCaller(rnd, rid, names, 'a');
+    const after = buildJunkCaller(rnd, rid, names, 'b');
+    result = junk + ' ' + before + after + ' return (function() ' + result + ' end)()';
+  }
+
+  return { code: result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: decoyCount } };
+}
+
+
+function buildJunk(rnd, rid, count) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const fn = rid();
+    const p1 = rid(), p2 = rid(), v1 = rid(), v2 = rid(), t1 = rid(), i1 = rid();
+    const kind = Math.floor(rnd() * 4);
+    if (kind === 0) {
+      out.push('local function ' + fn + '(' + p1 + ',' + p2 + ') '
+        + 'local ' + v1 + '=0 '
+        + 'for ' + i1 + '=1,(' + p1 + ' or 1) do '
+        + v1 + '=(' + v1 + '+(((' + i1 + '*(' + p2 + ' or 3))%251)+7))%65521 '
+        + 'end '
+        + 'local ' + t1 + '={' + v1 + ',(' + p1 + ' or 2)+(' + p2 + ' or 4)} '
+        + 'return ' + t1 + '[1]%(' + t1 + '[2]+1) end');
+    } else if (kind === 1) {
+      out.push('local function ' + fn + '(' + p1 + ') '
+        + 'local ' + t1 + '={} '
+        + 'for ' + i1 + '=1,(' + p1 + ' or 4) do '
+        + t1 + '[' + i1 + ']=string.char(((' + i1 + '*37)%90)+33) '
+        + 'end '
+        + 'local ' + v1 + '=table.concat(' + t1 + ') '
+        + 'local ' + v2 + '=#' + v1 + ' '
+        + 'return ' + v2 + '%(' + p1 + ' or 5) end');
+    } else if (kind === 2) {
+      out.push('local function ' + fn + '(' + p1 + ',' + p2 + ') '
+        + 'local ' + v1 + '=(' + p1 + ' or 1)*(' + p2 + ' or 1) '
+        + 'local ' + v2 + '=0 '
+        + 'while ' + v1 + '>0 do '
+        + v2 + '=' + v2 + '+(' + v1 + '%2) '
+        + v1 + '=math.floor(' + v1 + '/2) '
+        + 'end '
+        + 'return ' + v2 + ' end');
+    } else {
+      out.push('local function ' + fn + '(' + p1 + ') '
+        + 'local ' + t1 + '={' + p1 + ' or 1,2,3,5,8,13} '
+        + 'local ' + v1 + '=0 '
+        + 'for ' + i1 + '=1,#' + t1 + ' do '
+        + v1 + '=' + v1 + '+' + t1 + '[' + i1 + ']*' + i1 + ' '
+        + 'end '
+        + 'return ' + v1 + '%1000 end');
+    }
+  }
+  return out.join(' ');
+}
+
+function buildJunkCaller(rnd, rid, fns, tag) {
+  const call = rid(), guard = rid(), i = rid();
+  const pick = fns.length ? fns : [];
+  if (!pick.length) return '';
+  const calls = pick.map(function (f) { return f + '(' + (Math.floor(rnd() * 90) + 1) + ',' + (Math.floor(rnd() * 90) + 2) + ')'; }).join(' ');
+  return 'local ' + guard + '=0 for ' + i + '=1,0 do ' + guard + '=' + guard + '+1 end '
+    + 'if ' + guard + '>' + (Math.floor(rnd() * 9) + 1) + ' then ' + calls + ' end ';
+}
+
+function buildRemotePre(rnd, rid, url, keyPair, sfn) {
+  const A = rid(), M = rid(), R = rid(), K1 = rid(), K2 = rid(), B = rid(), I = rid();
+  const T = rid(), N = rid(), S = rid(), L = rid(), Q = rid(), G = rid(), D = rid();
+  const ch0 = M + '[' + R + ':sub(' + I + ',' + I + ')]';
+  const ch1 = M + '[' + R + ':sub(' + I + '+1,' + I + '+1)]';
+  const ch2 = M + '[' + R + ':sub(' + I + '+2,' + I + '+2)]';
+  const parts = [];
+  parts.push('local ' + A + '=string.char(97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,48,49,50,51,52,53,54,55,56,57)');
+  parts.push('local ' + M + '={} for ' + I + '=1,#' + A + ' do ' + M + '[' + A + ':sub(' + I + ',' + I + ')]=' + I + '-1 end');
+  parts.push('local ' + R + '=nil');
+  parts.push('pcall(function() ' + R + '=game:HttpGet("' + url + '") end)');
+  parts.push('if type(' + R + ')~="string" then return end');
+  parts.push('local ' + K1 + '=' + ((keyPair && keyPair.k1) || (1 + Math.floor(rnd() * 200))));
+  parts.push('local ' + K2 + '=' + ((keyPair && keyPair.k2) || Math.floor(rnd() * 250)));
+  parts.push('local ' + B + '={} local ' + I + '=1 local ' + Q + '=0');
+  parts.push('while ' + I + '<=#' + R + ' do local ' + D + '=' + ch0 + '*3844+' + ch1 + '*62+' + ch2
+    + ' ' + Q + '=' + Q + '+1 ' + B + '[' + Q + ']=(math.floor(' + D + '/256)-((' + Q + '*' + K1 + '+' + K2 + ')%256))%256'
+    + ' ' + Q + '=' + Q + '+1 ' + B + '[' + Q + ']=((' + D + '%256)-((' + Q + '*' + K1 + '+' + K2 + ')%256))%256'
+    + ' ' + I + '=' + I + '+3 end');
+  parts.push('local ' + T + '={} local ' + I + '=1');
+  parts.push('while ' + I + '+1<=#' + B + ' do local ' + N + '=' + B + '[' + I + ']*256+' + B + '[' + I + '+1] '
+    + 'local ' + S + '="" for ' + L + '=0,' + N + '-1 do ' + S + '=' + S + '..string.char(' + B + '[' + I + '+2+' + L + ']) end '
+    + T + '[#' + T + '+1]=' + S + ' ' + I + '=' + I + '+2+' + N + ' end');
+  parts.push('local function ' + sfn + '(' + I + ') return ' + T + '[' + I + '] end');
+  return parts.join(' ') + ' ';
 }
 
 const B62 = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
