@@ -583,6 +583,31 @@ function luaObfuscate(source, options) {
 
   let result = pre + body;
 
+  if (o.wrap && Number(o.level) >= 5 && !o.remote && process.env.FULL_VM !== '0') {
+    const vmCode = tryFullVM(source, rid);
+    if (vmCode) {
+      let packed = vmCode;
+      let prev = -1;
+      for (let li = 0; li < 2; li++) {
+        const p2 = packBlob(packed, rnd, o.hideErrors && li === 1, rid, prev, li === 1 ? 0 : undefined);
+        packed = p2.code;
+        prev = p2.scheme;
+      }
+      const mul = Math.max(0, Number(o.junkMul) || 0);
+      const target = Math.min(600000, Math.floor(String(source).length * mul));
+      let out = packed;
+      if (target > 0) {
+        const built = buildJunkToSize(rnd, rid, target, Math.max(0, Number(o.decoys) || 0));
+        if (built.code) out = built.code + ' return (function() ' + out + ' end)()';
+      }
+      return {
+        code: out,
+        vault: null,
+        stats: { strings: 0, original: source.length, output: out.length, decoys: 0, junk: Math.max(0, out.length - packed.length), fullVm: true }
+      };
+    }
+  }
+
   if (o.wrap) {
     let layers = Math.max(1, Math.min(8, Number(o.layers) || 1));
     const srcBytes = source.length;
@@ -1271,4 +1296,15 @@ function packBlob(src, rnd, hideErrors, rid, avoid, forceIdx) {
   return { code: SCHEMES[idx](src, rnd, hideErrors, rid), scheme: idx };
 }
 
-module.exports = { luaObfuscate: luaObfuscate, lexLua: lexLua };
+const { parseLua, buildVM } = require('./vm.js');
+
+function tryFullVM(src, rid) {
+  try {
+    const ast = parseLua(lexLua(src));
+    return buildVM(ast, rid);
+  } catch (e) {
+    return null;
+  }
+}
+
+module.exports = { luaObfuscate: luaObfuscate, lexLua: lexLua, tryFullVM: tryFullVM };

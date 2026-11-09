@@ -145,3 +145,20 @@ POST /api/discord/premium/cleared    -> ยืนยันว่าถอดย�
 
 ตั้งได้ใน `.env` (`EMOJI_VERIFY`, `EMOJI_PREMIUM`, `EMOJI_LV`, `EMOJI_TIMES`, `EMOJI_CROWN`)
 รูปแบบ `<:ชื่อ:id>` — ถ้าไม่ตั้งจะใช้ค่าเริ่มต้น
+
+## Obfuscator ระดับ 5 (Bytecode VM)
+
+ระดับ 5 ไม่ได้แค่เข้ารหัสข้อความ — `vm.js` จะ **parse โค้ด Lua เป็น AST**
+แล้วส่งให้ interpreter ของเราเองรัน (`buildVM`)
+
+- ไม่มี `loadstring(โค้ดจริง)` เหลือเลย — โค้ดกลายเป็นโครงสร้างข้อมูล
+- AST ถูกห่อด้วย pack scheme อีก 2 ชั้น + โค้ดขยะ
+- ถ้า parse ไม่ผ่าน (ใช้ goto, ไวยากรณ์แปลก) จะ **fallback** ไปใช้วิธีเดิมอัตโนมัติ
+
+| เรื่อง | ค่า |
+|---|---|
+| ความเร็วตอนรัน | ช้ากว่า native ~3-5 เท่า |
+| ขนาดไฟล์ | ~1.5-2 เท่าของวิธีเดิม |
+| ฟีเจอร์ที่รองรับ | ตัวแปร, ฟังก์ชัน/closure, table, if/while/repeat/for, vararg, method call |
+
+ปิดได้ด้วย `FULL_VM=0` ใน env (จะกลับไปใช้ VM-decoder เดิม)
