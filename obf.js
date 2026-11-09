@@ -596,7 +596,7 @@ function luaObfuscate(source, options) {
     const lvNum = Number(o.level) || 1;
     for (let li = 0; li < layers; li++) {
       const isOuter = li === layers - 1;
-      const force = (isOuter && lvNum >= 3) ? 3 : undefined;
+      const force = isOuter ? (lvNum >= 4 ? 4 : (lvNum >= 3 ? 3 : undefined)) : undefined;
       const packed = packBlob(result, rnd, o.hideErrors, rid, prev, force);
       result = packed.code;
       prev = packed.scheme;
@@ -1065,7 +1065,200 @@ function schemeD(src, rnd, hideErrors, rid) {
   return p.join(' ');
 }
 
-const SCHEMES = [schemeA, schemeB, schemeC, schemeD];
+
+const VM_OPS = ['CONST','MOV','LEN','NEWT','JGT','SUBSTR','FIND','SUB','ADD','MUL','DIV','MOD','CHR','APPEND','JMP','CONCAT','LOADFN','CALL','RET','HALT','RUN','SLICE'];
+
+function schemeE(src, rnd, hideErrors, rid) {
+  const bytes = toByteString(src);
+  const n = bytes.length;
+  const k1 = 1 + Math.floor(rnd() * 190);
+  const k2 = Math.floor(rnd() * 250);
+  const blob = [];
+  const enc = [];
+  for (let i = 0; i < n; i++) {
+    const b = bytes.charCodeAt(i) & 255;
+    const j = i + 1;
+    enc.push((b + ((j * k1 + k2) % 256)) % 256);
+  }
+  if (enc.length % 2) enc.push(0);
+  for (let i = 0; i < enc.length; i += 2) {
+    const v = enc[i] * 256 + enc[i + 1];
+    blob.push(B62[Math.floor(v / 3844)] + B62[Math.floor((v % 3844) / 62)] + B62[v % 62]);
+  }
+  const blobStr = blob.join('');
+
+  const omap = {};
+  const used = {};
+  for (let i = 0; i < VM_OPS.length; i++) {
+    let v;
+    do { v = Math.floor(rnd() * 31); } while (used[v]);
+    used[v] = 1;
+    omap[VM_OPS[i]] = v;
+  }
+  const mkey = Math.floor(rnd() * 31);
+
+  const consts = {
+    1: B62,
+    2: blobStr,
+    3: k1,
+    4: k2,
+    5: 3844,
+    6: 62,
+    7: 256,
+    8: 1,
+    9: k1,
+    10: k2,
+    11: 1,
+    12: 3,
+    13: 0,
+    14: enc.length / 2,
+    15: n
+  };
+  const konst = [];
+  const kIdx = {};
+  let kc = 1;
+  function K(v) {
+    const key = String(v);
+    if (kIdx[key] === undefined) { kIdx[key] = kc; konst.push(v); kc++; }
+    return kIdx[key];
+  }
+  function op(name) { return omap[name]; }
+  function ins(name, a, b, c) {
+    const w = op(name) * 1000000 + (a || 0) * 10000 + (b || 0) * 100 + (c || 0);
+    return (w * 1 + mkey * 1) * 1;
+  }
+  const prog = [];
+  function emit(name, a, b, c) {
+    const o = (op(name) + mkey) % 31;
+    prog.push(o * 1000000 + (a || 0) * 10000 + (b || 0) * 100 + (c || 0));
+  }
+  const r = {
+    alpha: 1, blobr: 2, len: 3, out: 4, i: 5, j: 6, k1r: 7, k2r: 8,
+    c3844: 9, c62: 10, c256: 11, one: 12, three: 13, zero: 14,
+    t1: 15, t2: 16, t3: 17, t4: 18, t5: 19, t6: 20, t7: 21, t8: 22,
+    s1: 23, s2: 24, hi: 25, lo: 26, jj: 27, by: 28, st: 29, ln: 30, exp: 31, ld: 32, res: 33, ok: 34
+  };
+
+  emit('CONST', r.alpha, K(B62), 0);
+  emit('CONST', r.blobr, K(blobStr), 0);
+  emit('LEN', r.len, r.blobr, 0);
+  emit('NEWT', r.out, 0, 0);
+  emit('CONST', r.i, K(1), 0);
+  emit('CONST', r.j, K(0), 0);
+  emit('CONST', r.k1r, K(k1), 0);
+  emit('CONST', r.k2r, K(k2), 0);
+  emit('CONST', r.c3844, K(3844), 0);
+  emit('CONST', r.c62, K(62), 0);
+  emit('CONST', r.c256, K(256), 0);
+  emit('CONST', r.one, K(1), 0);
+  emit('CONST', r.three, K(3), 0);
+  emit('CONST', r.zero, K(0), 0);
+  emit('CONST', r.exp, K(n), 0);
+
+  const loopPos = prog.length + 1;
+  emit('JGT', r.i, r.len, 0);
+  const jgtAt = prog.length - 1;
+
+  emit('SUBSTR', r.t1, r.blobr, r.i);
+  emit('FIND', r.t1, r.alpha, r.t1);
+  emit('SUB', r.t1, r.t1, r.one);
+  emit('ADD', r.t2, r.i, r.one);
+  emit('SUBSTR', r.t3, r.blobr, r.t2);
+  emit('FIND', r.t3, r.alpha, r.t3);
+  emit('SUB', r.t3, r.t3, r.one);
+  emit('ADD', r.t4, r.t2, r.one);
+  emit('SUBSTR', r.t5, r.blobr, r.t4);
+  emit('FIND', r.t5, r.alpha, r.t5);
+  emit('SUB', r.t5, r.t5, r.one);
+  emit('MUL', r.t6, r.t1, r.c3844);
+  emit('MUL', r.t7, r.t3, r.c62);
+  emit('ADD', r.t6, r.t6, r.t7);
+  emit('ADD', r.t6, r.t6, r.t5);
+  emit('DIV', r.hi, r.t6, r.c256);
+  emit('MOD', r.lo, r.t6, r.c256);
+
+  emit('ADD', r.j, r.j, r.one);
+  emit('MUL', r.jj, r.j, r.k1r);
+  emit('ADD', r.jj, r.jj, r.k2r);
+  emit('MOD', r.jj, r.jj, r.c256);
+  emit('SUB', r.by, r.hi, r.jj);
+  emit('MOD', r.by, r.by, r.c256);
+  emit('CHR', r.by, r.by, 0);
+  emit('APPEND', r.out, r.by, 0);
+
+  emit('ADD', r.j, r.j, r.one);
+  emit('MUL', r.jj, r.j, r.k1r);
+  emit('ADD', r.jj, r.jj, r.k2r);
+  emit('MOD', r.jj, r.jj, r.c256);
+  emit('SUB', r.by, r.lo, r.jj);
+  emit('MOD', r.by, r.by, r.c256);
+  emit('CHR', r.by, r.by, 0);
+  emit('APPEND', r.out, r.by, 0);
+
+  emit('ADD', r.i, r.i, r.three);
+  emit('JMP', loopPos, 0, 0);
+
+  const endPos = prog.length + 1;
+  emit('CONCAT', r.st, r.out, 0);
+  emit('SLICE', r.st, r.st, r.exp);
+  emit('LEN', r.ln, r.st, 0);
+  const jgt1 = prog.length;
+  emit('JGT', r.ln, r.exp, 0);
+  const jgt2 = prog.length;
+  emit('JGT', r.exp, r.ln, 0);
+  emit('CONST', r.ld, K('__LOAD__'), 0);
+  emit('CALL', r.res, r.st, 0);
+  emit('RUN', r.res, 0, 0);
+  const haltPos = prog.length + 1;
+  emit('HALT', 0, 0, 0);
+  prog[jgt1] = ((op('JGT') + mkey) % 31) * 1000000 + r.ln * 10000 + r.exp * 100 + haltPos;
+  prog[jgt2] = ((op('JGT') + mkey) % 31) * 1000000 + r.exp * 10000 + r.ln * 100 + haltPos;
+
+  prog[jgtAt] = ((op('JGT') + mkey) % 31) * 1000000 + r.i * 10000 + r.len * 100 + endPos;
+  prog[jgtAt + 0] = prog[jgtAt];
+
+  const nm = loaderNames(rid);
+  const p = [];
+  p.push('local ' + nm.K1 + '={' + konst.map(function (v) { return typeof v === 'string' ? '"' + v + '"' : v; }).join(',') + '}');
+  p.push('local ' + nm.BL + '={' + prog.join(',') + '}');
+  p.push('local ' + nm.OUT + '={}');
+  p.push('local ' + nm.P + '=1');
+  p.push('local ' + nm.C + '=' + mkey);
+  p.push('while true do');
+  p.push('local ' + nm.V + '=' + nm.BL + '[' + nm.P + ']');
+  p.push(nm.P + '=' + nm.P + '+1');
+  p.push('local ' + nm.I + '=(math.floor(' + nm.V + '/1000000)-' + nm.C + ')%31');
+  p.push('local ' + nm.HX + '=math.floor(' + nm.V + '/10000)%100');
+  p.push('local ' + nm.T + '=math.floor(' + nm.V + '/100)%100');
+  p.push('local ' + nm.G + '=' + nm.V + '%100');
+
+  p.push('if ' + nm.I + '==' + op('CONST') + ' then ' + nm.OUT + '[' + nm.HX + ']=' + nm.K1 + '[' + nm.T + ']');
+  p.push('elseif ' + nm.I + '==' + op('MOV') + ' then ' + nm.OUT + '[' + nm.HX + ']=' + nm.OUT + '[' + nm.T + ']');
+  p.push('elseif ' + nm.I + '==' + op('LEN') + ' then ' + nm.OUT + '[' + nm.HX + ']=#' + nm.OUT + '[' + nm.T + ']');
+  p.push('elseif ' + nm.I + '==' + op('NEWT') + ' then ' + nm.OUT + '[' + nm.HX + ']={}');
+  p.push('elseif ' + nm.I + '==' + op('SUBSTR') + ' then ' + nm.OUT + '[' + nm.HX + ']=' + nm.OUT + '[' + nm.T + ']:sub(' + nm.OUT + '[' + nm.G + '],' + nm.OUT + '[' + nm.G + '])');
+  p.push('elseif ' + nm.I + '==' + op('FIND') + ' then ' + nm.OUT + '[' + nm.HX + ']=string.find(' + nm.OUT + '[' + nm.T + '],' + nm.OUT + '[' + nm.G + '],1,true)');
+  p.push('elseif ' + nm.I + '==' + op('SUB') + ' then ' + nm.OUT + '[' + nm.HX + ']=' + nm.OUT + '[' + nm.T + ']-' + nm.OUT + '[' + nm.G + ']');
+  p.push('elseif ' + nm.I + '==' + op('ADD') + ' then ' + nm.OUT + '[' + nm.HX + ']=' + nm.OUT + '[' + nm.T + ']+' + nm.OUT + '[' + nm.G + ']');
+  p.push('elseif ' + nm.I + '==' + op('MUL') + ' then ' + nm.OUT + '[' + nm.HX + ']=' + nm.OUT + '[' + nm.T + ']*' + nm.OUT + '[' + nm.G + ']');
+  p.push('elseif ' + nm.I + '==' + op('DIV') + ' then ' + nm.OUT + '[' + nm.HX + ']=math.floor(' + nm.OUT + '[' + nm.T + ']/' + nm.OUT + '[' + nm.G + '])');
+  p.push('elseif ' + nm.I + '==' + op('MOD') + ' then ' + nm.OUT + '[' + nm.HX + ']=' + nm.OUT + '[' + nm.T + ']%' + nm.OUT + '[' + nm.G + ']');
+  p.push('elseif ' + nm.I + '==' + op('CHR') + ' then ' + nm.OUT + '[' + nm.HX + ']=string.char(' + nm.OUT + '[' + nm.T + '])');
+  p.push('elseif ' + nm.I + '==' + op('APPEND') + ' then ' + nm.OUT + '[' + nm.HX + '][#' + nm.OUT + '[' + nm.HX + ']+1]=' + nm.OUT + '[' + nm.T + ']');
+  p.push('elseif ' + nm.I + '==' + op('JMP') + ' then ' + nm.P + '=' + nm.HX);
+  p.push('elseif ' + nm.I + '==' + op('JGT') + ' then if ' + nm.OUT + '[' + nm.HX + ']>' + nm.OUT + '[' + nm.T + '] then ' + nm.P + '=' + nm.G + ' end');
+  p.push('elseif ' + nm.I + '==' + op('CONCAT') + ' then ' + nm.OUT + '[' + nm.HX + ']=table.concat(' + nm.OUT + '[' + nm.T + '] or {})');
+  p.push('elseif ' + nm.I + '==' + op('CALL') + ' then local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV ' + nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)] ' + nm.OUT + '[' + nm.HX + ']=' + nm.LD + '(' + nm.OUT + '[' + nm.T + '])');
+  p.push('elseif ' + nm.I + '==' + op('RET') + ' then return ' + nm.OUT + '[' + nm.HX + ']');
+  p.push('elseif ' + nm.I + '==' + op('RUN') + ' then local ' + nm.FN + '=' + nm.OUT + '[' + nm.HX + '] if type(' + nm.FN + ')=="function" then return ' + nm.FN + '() end return ' + nm.FN);
+  p.push('elseif ' + nm.I + '==' + op('SLICE') + ' then ' + nm.OUT + '[' + nm.HX + ']=string.sub(' + nm.OUT + '[' + nm.T + '],1,' + nm.OUT + '[' + nm.G + '])');
+  p.push('else break end');
+  p.push('end');
+  p.push('return nil');
+  return p.join(' ');
+}
+
+const SCHEMES = process.env.VM_ONLY === '1' ? [schemeE] : [schemeA, schemeB, schemeC, schemeD, schemeE];
 
 function packBlob(src, rnd, hideErrors, rid, avoid, forceIdx) {
   let idx = (typeof forceIdx === 'number' && forceIdx >= 0 && forceIdx < SCHEMES.length)

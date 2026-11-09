@@ -376,6 +376,89 @@ async function onReady() {
 }
 client.once('clientReady', onReady);
 
+const BACKUP_CHANNEL = process.env.BACKUP_CHANNEL || VERIFY_LOG;
+
+function isOwnerOrStaff(member) {
+  if (!member) return false;
+  if (member.guild && member.id === member.guild.ownerId) return true;
+  if (member.permissions && member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
+  return STAFF_ROLES.some(function (r) { return member.roles.cache.has(r); });
+}
+
+async function exportAll(message) {
+  await message.reply({ content: '⏳ กำลังดึงข้อมูล...' }).catch(function () {});
+  try {
+    const res = await fetch(WEB_URL + '/api/discord/export', { headers: { 'x-bot-secret': BOT_SECRET } });
+    if (!res.ok) {
+      const t = await res.text().catch(function () { return ''; });
+      return message.channel.send({ content: 'ดึงข้อมูลไม่สำเร็จ: ' + (t.slice(0, 200) || res.status) });
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const file = new AttachmentBuilder(buf, { name: 'sakad-hub-backup-' + stamp + '.json' });
+    let botState = null;
+    try { botState = fs.readFileSync(path.join(__dirname, 'bot-state.json'), 'utf8'); } catch (e) {}
+    let premState = null;
+    try { premState = fs.readFileSync(PREMIUM_STATE, 'utf8'); } catch (e) {}
+    const extra = [];
+    if (botState) extra.push(new AttachmentBuilder(Buffer.from(botState), { name: 'bot-state.json' }));
+    if (premState) extra.push(new AttachmentBuilder(Buffer.from(premState), { name: 'premium-state.json' }));
+    await message.channel.send({
+      content: '📦 ข้อมูลสำรอง (' + (buf.length / 1024).toFixed(1) + ' KB) โดย ' + message.author,
+      files: [file].concat(extra)
+    });
+  } catch (e) {
+    await message.channel.send({ content: 'ผิดพลาด: ' + e.message }).catch(function () {});
+  }
+}
+
+async function importAll(message) {
+  const target = message.reference ? await message.channel.messages.fetch(message.reference.messageId).catch(function () { return null; }) : null;
+  const src = target || message;
+  const att = src.attachments.first();
+  if (!att) return message.reply({ content: 'ต้องแนบไฟล์ .json มาด้วย (หรือตอบกลับข้อความที่มีไฟล์)' });
+  if (!/\.json$/i.test(att.name || '')) return message.reply({ content: 'รองรับเฉพาะไฟล์ .json' });
+  if (att.size > 40 * 1024 * 1024) return message.reply({ content: 'ไฟล์ใหญ่เกิน 40MB' });
+
+  await message.reply({ content: '⏳ กำลังนำเข้าข้อมูล...' }).catch(function () {});
+  try {
+    const dl = await fetch(att.url);
+    if (!dl.ok) return message.channel.send({ content: 'ดาวน์โหลดไฟล์ไม่สำเร็จ' });
+    const text = await dl.text();
+    let parsed;
+    try { parsed = JSON.parse(text); } catch (e) { return message.channel.send({ content: 'ไฟล์ JSON เสีย' }); }
+    const res = await fetch(WEB_URL + '/api/discord/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
+      body: JSON.stringify(parsed)
+    });
+    const data = await res.json().catch(function () { return {}; });
+    if (!res.ok) return message.channel.send({ content: 'นำเข้าไม่สำเร็จ: ' + (data.error || res.status) });
+    await message.channel.send({
+      content: '✅ นำเข้าสำเร็จ — ผู้ใช้ ' + data.users + ' คน, ไฟล์ ' + data.files + ' รายการ\nสำรองข้อมูลเดิมไว้ที่ `' + data.backup + '`'
+    });
+  } catch (e) {
+    await message.channel.send({ content: 'ผิดพลาด: ' + e.message }).catch(function () {});
+  }
+}
+
+client.on('messageCreate', async function (message) {
+  try {
+    if (!message.guild || message.author.bot) return;
+    const content = (message.content || '').trim();
+    if (!content.startsWith('!')) return;
+    const cmd = content.replace(/^!+/, '').split(/\s+/)[0];
+    if (cmd !== 'เซฟข้อมูลทั้งหมด' && cmd !== 'อัปข้อมูล') return;
+    if (!isOwnerOrStaff(message.member)) {
+      return message.reply({ content: 'เฉพาะพนักงานเท่านั้น' }).catch(function () {});
+    }
+    if (cmd === 'เซฟข้อมูลทั้งหมด') return await exportAll(message);
+    if (cmd === 'อัปข้อมูล') return await importAll(message);
+  } catch (e) {
+    console.error('command error:', e.message);
+  }
+});
+
 client.on('interactionCreate', async function (interaction) {
   if (!interaction.isRepliable()) return;
   if (!freshInteraction(interaction.id)) return;

@@ -23,13 +23,20 @@ if [ ! -d node_modules/discord.js ]; then
   npm install --no-audit --no-fund || exit 1
 fi
 
+CYCLE="${BOT_CYCLE_SECONDS:-7200}"
+PAUSE="${BOT_PAUSE_SECONDS:-5}"
+
 fails=0
 while true; do
   start=$(date +%s)
-  node bot.js 2>&1 | tee -a bot.log
+  echo "[$(date '+%F %T')] เริ่มบอท (รอบ ${CYCLE}s)" | tee -a bot.log
+  timeout "$CYCLE" node bot.js 2>&1 | tee -a bot.log
+  rc=${PIPESTATUS[0]}
   end=$(date +%s)
   took=$(( end - start ))
-  if [ "$took" -lt 10 ]; then
+  if [ "$rc" -eq 124 ] || [ "$took" -ge "$CYCLE" ]; then
+    fails=0
+  elif [ "$took" -lt 10 ]; then
     fails=$(( fails + 1 ))
     echo "[$(date '+%F %T')] บอทออกเร็วผิดปกติ (${took}s) ครั้งที่ $fails" | tee -a bot.log
     if [ "$fails" -ge 3 ]; then
@@ -39,6 +46,6 @@ while true; do
   else
     fails=0
   fi
-  echo "[$(date '+%F %T')] รีสตาร์ทบอทใน 5 วินาที..." | tee -a bot.log
-  sleep 5
+  echo "[$(date '+%F %T')] รีสตาร์ทบอทใน ${PAUSE}s..." | tee -a bot.log
+  sleep "$PAUSE"
 done

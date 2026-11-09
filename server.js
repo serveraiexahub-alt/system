@@ -611,6 +611,50 @@ app.post('/api/discord/premium/cleared', function (req, res) {
   res.json({ ok: true });
 });
 
+app.get('/api/discord/export', function (req, res) {
+  if (!botAuth(req, res)) return;
+  const payload = {
+    ok: true,
+    app: 'sakad-hub',
+    version: 1,
+    exportedAt: Date.now(),
+    data: db
+  };
+  const body = Buffer.from(JSON.stringify(payload), 'utf8');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="sakad-hub-backup.json"');
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(body);
+});
+
+app.post('/api/discord/import', function (req, res) {
+  if (!botAuth(req, res)) return;
+  const body = req.body || {};
+  const incoming = body.data && typeof body.data === 'object' ? body.data : null;
+  if (!incoming) return res.status(400).json({ error: 'ไฟล์ไม่ถูกต้อง (ไม่พบ data)' });
+  if (!incoming.users || !incoming.files) return res.status(400).json({ error: 'ไฟล์ไม่ถูกต้อง (ไม่มี users/files)' });
+  if (typeof incoming.users !== 'object' || typeof incoming.files !== 'object') {
+    return res.status(400).json({ error: 'ไฟล์ไม่ถูกต้อง (รูปแบบผิด)' });
+  }
+  const backup = DATA_FILE + '.bak-' + Date.now();
+  try {
+    fs.copyFileSync(DATA_FILE, backup);
+  } catch (e) {}
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(incoming));
+  fs.renameSync(tmp, DATA_FILE);
+  db = load();
+  ensureDb();
+  save();
+  res.json({
+    ok: true,
+    users: Object.keys(db.users).length,
+    files: Object.keys(db.files).length,
+    backup: backup,
+    exportedAt: Number(body.exportedAt || 0)
+  });
+});
+
 app.post('/api/discord/verify', function (req, res) {
   if (!BOT_SECRET) return res.status(503).json({ error: 'Discord verification is not configured' });
   const got = String(req.headers['x-bot-secret'] || '');
