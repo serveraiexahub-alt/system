@@ -43,6 +43,11 @@ const WELCOME_GIF = process.env.WELCOME_GIF || 'https://cdn.discordapp.com/attac
 const LEAVE_GIF = process.env.LEAVE_GIF || 'https://cdn.discordapp.com/attachments/1458606026847817772/1565271048147042385/walter-white.gif';
 const VERIFY_IMG = process.env.VERIFY_IMG || 'https://cdn.discordapp.com/attachments/1458606026847817772/1565273294037581854/images.png';
 const CODE_GIF_FILE = path.join(__dirname, 'assets', 'verify-code.gif');
+const PREMIUM_CHANNEL = process.env.PREMIUM_CHANNEL || '1569171285974585445';
+const PREMIUM_IMG_FILE = path.join(__dirname, 'assets', 'premium.jpg');
+const STAFF_ROLES = String(process.env.STAFF_ROLES || '1568617536038248579,1565637911829811290,1407171324144783402,1568617785347543171')
+  .split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+const PREMIUM_STATE = path.join(__dirname, 'premium-state.json');
 const CODE_GIF_URL = process.env.CODE_GIF_URL || 'https://cdn.discordapp.com/attachments/1568081274344570880/1569137031509057657/image0.gif';
 
 const PURPLE = 0x9b59b6;
@@ -125,7 +130,7 @@ function makeCode() {
 }
 
 function buildCaptchaPayload(code) {
-  const cap = makeCaptcha({ digits: code.length });
+  const cap = makeCaptcha({ digits: code.length, value: code });
   const file = new AttachmentBuilder(cap.png, { name: 'captcha.png' });
   const embed = new EmbedBuilder()
     .setColor(GREEN)
@@ -201,6 +206,105 @@ function codeGifFile() {
   return null;
 }
 
+let roomState = {};
+try { roomState = JSON.parse(fs.readFileSync(PREMIUM_STATE, 'utf8')) || {}; } catch (e) { roomState = {}; }
+function saveRoomState() {
+  try { fs.writeFileSync(PREMIUM_STATE, JSON.stringify(roomState, null, 2)); } catch (e) {}
+}
+
+function isStaff(member) {
+  if (!member || !member.roles) return false;
+  if (member.permissions && member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
+  return STAFF_ROLES.some(function (r) { return member.roles.cache.has(r); });
+}
+
+async function webPremium(username, plan) {
+  const res = await fetch(WEB_URL + '/api/discord/premium', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
+    body: JSON.stringify({ username: username, plan: plan })
+  });
+  const data = await res.json().catch(function () { return {}; });
+  return { ok: res.ok, data: data };
+}
+
+function roomPayload(channelId) {
+  const st = roomState[channelId] || {};
+  const embed = new EmbedBuilder()
+    .setTitle('💎 ห้องสมัครพรีเมียม')
+    .setColor(0xf1c40f)
+    .setDescription(
+      '**ชื่อบัญชีเว็บ:** ' + (st.username ? '`' + st.username + '`' : 'ยังไม่ได้กรอก') + '\n' +
+      '**แพ็กเกจ:** ' + (st.plan === '1y' ? '1 ปี' : (st.plan === '1m' ? '1 เดือน' : 'ยังไม่ได้เลือก')) + '\n\n' +
+      'ขั้นตอน: กด **กรอกชื่อบัญชี** → เลือกแพ็กเกจ → พนักงานกดปุ่ม **ยืนยันให้พรีเมียม**'
+    )
+    .setFooter({ text: 'ปิดห้องได้เมื่อให้พรีเมียมเสร็จ' });
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('prem_user').setLabel('กรอกชื่อบัญชี').setEmoji('👤').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('prem_1m').setLabel('1 เดือน').setEmoji('🗓️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('prem_1y').setLabel('1 ปี').setEmoji('📅').setStyle(ButtonStyle.Secondary)
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('prem_apply').setLabel('ยืนยันให้พรีเมียม').setEmoji('✅').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('prem_close').setLabel('ปิดห้อง').setEmoji('🔒').setStyle(ButtonStyle.Danger)
+  );
+  return { embeds: [embed], components: [row1, row2] };
+}
+
+async function ensurePremiumPanel() {
+  try {
+    const channel = await client.channels.fetch(PREMIUM_CHANNEL).catch(function () { return null; });
+    if (!channel) { console.log('❌ ไม่พบช่องสมัครพรีเมียม'); return; }
+    let file = null;
+    try {
+      if (fs.existsSync(PREMIUM_IMG_FILE)) file = new AttachmentBuilder(fs.readFileSync(PREMIUM_IMG_FILE), { name: 'premium.jpg' });
+    } catch (e) {}
+    const embed = new EmbedBuilder()
+      .setTitle('💎 สมัครพรีเมียม')
+      .setColor(0xf1c40f)
+      .setDescription(
+        '**สิทธิพิเศษ**\n' +
+        '👑 ใช้ปกปิดโค้ดได้ทุกระดับ (1-5)\n' +
+        '🔟 ปกปิดได้ 10 ครั้ง/วัน (ฟรี 5 ครั้ง)\n' +
+        '✨ ไอคอนมงกุฎหลังชื่อ\n\n' +
+        'กดปุ่มด้านล่างเพื่อเปิดห้องสมัคร'
+      );
+    if (file) embed.setImage('attachment://premium.jpg');
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prem_open').setLabel('เปิดห้องสมัครพรีเมียม').setEmoji('💎').setStyle(ButtonStyle.Success)
+    );
+    const payload = { embeds: [embed], components: [row] };
+    if (file) payload.files = [file];
+    const r = await syncPanel(channel, 'prem_open', payload);
+    console.log('✅ แผงพรีเมียม: ' + r);
+  } catch (err) {
+    console.error('❌ สร้างแผงพรีเมียมไม่สำเร็จ:', err.message);
+  }
+}
+
+async function openPremiumRoom(interaction) {
+  const guild = interaction.guild;
+  if (!guild) return interaction.reply({ content: 'ใช้ได้ในเซิร์ฟเวอร์เท่านั้น', flags: MessageFlags.Ephemeral });
+  const overwrites = [
+    { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+    { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
+    { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels] }
+  ];
+  for (const rid of STAFF_ROLES) {
+    overwrites.push({ id: rid, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] });
+  }
+  const ch = await guild.channels.create({
+    name: 'พรีเมียม-' + interaction.user.username.slice(0, 20),
+    type: 0,
+    parent: interaction.channel.parentId || null,
+    permissionOverwrites: overwrites
+  });
+  roomState[ch.id] = { owner: interaction.user.id, username: '', plan: '', created: Date.now() };
+  saveRoomState();
+  await ch.send(roomPayload(ch.id));
+  return interaction.reply({ content: 'เปิดห้องแล้ว: ' + ch, flags: MessageFlags.Ephemeral });
+}
+
 async function ensureVerifyPanel() {
   try {
     const channel = await client.channels.fetch(VERIFY_CHANNEL).catch(function () { return null; });
@@ -256,6 +360,7 @@ async function onReady() {
   console.log('✅ บอทออนไลน์แล้ว: ' + client.user.tag);
   await ensureVerifyPanel();
   await ensureWebPanel();
+  await ensurePremiumPanel();
 }
 client.once('clientReady', onReady);
 
@@ -393,6 +498,79 @@ client.on('interactionCreate', async function (interaction) {
       await sendVerifyLog(interaction, 'ยืนยันบัญชีเว็บสำเร็จ (ชื่อ "' + data.username + '")');
       return;
     }
+    if (interaction.isButton() && interaction.customId === 'prem_open') {
+      return await openPremiumRoom(interaction);
+    }
+
+    if (interaction.isButton() && interaction.customId === 'prem_user') {
+      const modal = new ModalBuilder().setCustomId('prem_user_modal').setTitle('ชื่อบัญชีเว็บ');
+      const input = new TextInputBuilder()
+        .setCustomId('username')
+        .setLabel('ชื่อผู้ใช้บนเว็บ (a-z 0-9 _)')
+        .setStyle(TextInputStyle.Short)
+        .setMinLength(3)
+        .setMaxLength(20)
+        .setRequired(true);
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      if (interaction.replied || interaction.deferred) return;
+      try { await interaction.showModal(modal); } catch (e) { if (!isExpired(e)) console.error(e.message); }
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === 'prem_user_modal') {
+      const st = roomState[interaction.channelId];
+      if (!st) return interaction.reply({ content: 'ไม่พบข้อมูลห้องนี้', flags: MessageFlags.Ephemeral });
+      st.username = interaction.fields.getTextInputValue('username').trim().toLowerCase();
+      saveRoomState();
+      await interaction.update(roomPayload(interaction.channelId)).catch(function () {});
+      return;
+    }
+
+    if (interaction.isButton() && (interaction.customId === 'prem_1m' || interaction.customId === 'prem_1y')) {
+      const st = roomState[interaction.channelId];
+      if (!st) return interaction.reply({ content: 'ไม่พบข้อมูลห้องนี้', flags: MessageFlags.Ephemeral });
+      st.plan = interaction.customId === 'prem_1y' ? '1y' : '1m';
+      saveRoomState();
+      await interaction.update(roomPayload(interaction.channelId)).catch(function () {});
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === 'prem_apply') {
+      const st = roomState[interaction.channelId];
+      if (!st) return interaction.reply({ content: 'ไม่พบข้อมูลห้องนี้', flags: MessageFlags.Ephemeral });
+      if (!isStaff(interaction.member)) {
+        return interaction.reply({ content: 'เฉพาะพนักงานเท่านั้น', flags: MessageFlags.Ephemeral });
+      }
+      if (!st.username) return interaction.reply({ content: 'ยังไม่ได้กรอกชื่อบัญชี', flags: MessageFlags.Ephemeral });
+      if (!st.plan) return interaction.reply({ content: 'ยังไม่ได้เลือกแพ็กเกจ', flags: MessageFlags.Ephemeral });
+      await interaction.deferReply();
+      const r = await webPremium(st.username, st.plan);
+      if (!r.ok) {
+        return interaction.editReply({ content: 'ให้พรีเมียมไม่สำเร็จ: ' + (r.data.error || 'unknown') });
+      }
+      const untilTs = Math.floor(Number(r.data.until || 0) / 1000);
+      await interaction.editReply({
+        content: '✅ ให้พรีเมียม **' + st.username + '** แพ็กเกจ ' + (st.plan === '1y' ? '1 ปี' : '1 เดือน') +
+          ' แล้ว\nหมดอายุ <t:' + untilTs + ':F>'
+      });
+      st.done = true;
+      saveRoomState();
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === 'prem_close') {
+      const st = roomState[interaction.channelId];
+      const allowed = isStaff(interaction.member) || (st && st.owner === interaction.user.id);
+      if (!allowed) return interaction.reply({ content: 'เฉพาะพนักงานหรือเจ้าของห้องเท่านั้น', flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: '🔒 ปิดห้องใน 3 วินาที...' }).catch(function () {});
+      setTimeout(function () {
+        delete roomState[interaction.channelId];
+        saveRoomState();
+        interaction.channel.delete().catch(function () {});
+      }, 3000);
+      return;
+    }
+
   } catch (e) {
     if (!isExpired(e)) console.error('interaction error:', e.message || e.code);
     try {

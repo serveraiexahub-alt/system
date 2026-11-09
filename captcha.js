@@ -89,9 +89,15 @@ function makeCaptcha(opts) {
     rgb[i] = r; rgb[i + 1] = g; rgb[i + 2] = b;
   }
 
-  const answer = [];
-  for (let d = 0; d < o.digits; d++) answer.push(randInt(10));
-  const answerStr = answer.join('');
+  let answerStr;
+  if (o.value !== undefined && o.value !== null && String(o.value).length === o.digits) {
+    answerStr = String(o.value);
+  } else {
+    let tmp = '';
+    for (let d = 0; d < o.digits; d++) tmp += randInt(10);
+    answerStr = tmp;
+  }
+  const answer = answerStr.split('').map(Number);
 
   const scale = 5 + randInt(2);
   const startX = 14 + randInt(4);
