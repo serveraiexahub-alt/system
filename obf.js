@@ -209,7 +209,8 @@ const LEVELS = {
   2: { layers: 2, junk: 2.5, decoys: 14,  junkMul: 2.5, strings: true, numbers: true, rename: true },
   3: { layers: 3, junk: 8,   decoys: 60,  junkMul: 8,   strings: true, numbers: true, rename: true, fakes: 1 },
   4: { layers: 4, junk: 15,  decoys: 120, junkMul: 15,  strings: true, numbers: true, rename: true, fakes: 2 },
-  5: { layers: 5, junk: 25,  decoys: 200, junkMul: 25,  strings: true, numbers: true, rename: true, fakes: 3 }
+  5: { layers: 5, junk: 25,  decoys: 200, junkMul: 25,  strings: true, numbers: true, rename: true, fakes: 3 },
+  6: { layers: 6, junk: 40,  decoys: 300, junkMul: 40,  strings: true, numbers: true, rename: true, fakes: 3, shard: true }
 };
 
 function luaObfuscate(source, options) {
@@ -588,7 +589,8 @@ function luaObfuscate(source, options) {
     if (vmCode) {
       let packed = vmCode;
       let prev = -1;
-      for (let li = 0; li < 2; li++) {
+      const packRounds = Number(o.level) >= 6 ? 3 : 2;
+      for (let li = 0; li < packRounds; li++) {
         const p2 = packBlob(packed, rnd, o.hideErrors && li === 1, rid, prev, li === 1 ? 0 : undefined);
         packed = p2.code;
         prev = p2.scheme;
