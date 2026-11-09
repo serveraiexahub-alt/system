@@ -208,8 +208,8 @@ const LEVELS = {
   1: { layers: 1, junk: 1,   decoys: 6,   junkMul: 1,   strings: true, numbers: true, rename: true },
   2: { layers: 2, junk: 2.5, decoys: 14,  junkMul: 2.5, strings: true, numbers: true, rename: true },
   3: { layers: 3, junk: 8,   decoys: 60,  junkMul: 8,   strings: true, numbers: true, rename: true, fakes: 1 },
-  4: { layers: 3, junk: 15,  decoys: 120, junkMul: 15,  strings: true, numbers: true, rename: true, fakes: 2 },
-  5: { layers: 4, junk: 25,  decoys: 200, junkMul: 25,  strings: true, numbers: true, rename: true, fakes: 3 }
+  4: { layers: 4, junk: 15,  decoys: 120, junkMul: 15,  strings: true, numbers: true, rename: true, fakes: 2 },
+  5: { layers: 5, junk: 25,  decoys: 200, junkMul: 25,  strings: true, numbers: true, rename: true, fakes: 3 }
 };
 
 function luaObfuscate(source, options) {
@@ -593,8 +593,11 @@ function luaObfuscate(source, options) {
       budget -= need;
     }
     let prev = -1;
+    const lvNum = Number(o.level) || 1;
     for (let li = 0; li < layers; li++) {
-      const packed = packBlob(result, rnd, o.hideErrors, rid, prev);
+      const isOuter = li === layers - 1;
+      const force = (isOuter && lvNum >= 3) ? 3 : undefined;
+      const packed = packBlob(result, rnd, o.hideErrors, rid, prev, force);
       result = packed.code;
       prev = packed.scheme;
     }
@@ -740,8 +743,16 @@ function buildRemotePre(rnd, rid, url, keyPair, sfn) {
   const parts = [];
   parts.push('local ' + A + '=string.char(97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,48,49,50,51,52,53,54,55,56,57)');
   parts.push('local ' + M + '={} for ' + I + '=1,#' + A + ' do ' + M + '[' + A + ':sub(' + I + ',' + I + ')]=' + I + '-1 end');
+  const urlBytes = [];
+  for (let i = 0; i < url.length; i++) urlBytes.push(url.charCodeAt(i) & 255);
+  const urlKey = 1 + Math.floor(rnd() * 200);
+  const encUrl = urlBytes.map(function (c) { return (c + urlKey) % 256; });
+  const U1 = rid(), U2 = rid(), U3 = rid();
+  parts.push('local ' + U1 + '={' + encUrl.join(',') + '}');
+  parts.push('local ' + U2 + '={} for ' + U3 + '=1,#' + U1 + ' do ' + U2 + '[' + U3 + ']=string.char((' + U1 + '[' + U3 + ']-' + urlKey + ')%256) end');
   parts.push('local ' + R + '=nil');
-  parts.push('pcall(function() ' + R + '=game:HttpGet("' + url + '") end)');
+  parts.push('local ' + U3 + '=table.concat(' + U2 + ')');
+  parts.push('pcall(function() ' + R + '=game:HttpGet(' + U3 + ') end)');
   parts.push('if type(' + R + ')~="string" then return end');
   parts.push('local ' + K1 + '=' + ((keyPair && keyPair.k1) || (1 + Math.floor(rnd() * 200))));
   parts.push('local ' + K2 + '=' + ((keyPair && keyPair.k2) || Math.floor(rnd() * 250)));
@@ -968,11 +979,99 @@ function schemeC(src, rnd, hideErrors, rid) {
   return p.join(' ');
 }
 
-const SCHEMES = [schemeA, schemeB, schemeC];
 
-function packBlob(src, rnd, hideErrors, rid, avoid) {
-  let idx = Math.floor(rnd() * SCHEMES.length);
-  if (SCHEMES.length > 1) {
+function schemeD(src, rnd, hideErrors, rid) {
+  const bytes = toByteString(src);
+  const n = bytes.length;
+  const k1 = 1 + Math.floor(rnd() * 190);
+  const k2 = 1 + Math.floor(rnd() * 90);
+  const k3 = Math.floor(rnd() * 256);
+  const nm = loaderNames(rid);
+
+  const enc = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const b = bytes.charCodeAt(i) & 255;
+    const sw = (b % 16) * 16 + Math.floor(b / 16);
+    const j = i + 1;
+    enc[i] = (sw + ((j * k1 + j * j * k2 + k3) % 256)) % 256;
+  }
+
+  const blockCount = Math.max(2, Math.min(6, 2 + Math.floor(rnd() * 5)));
+  const per = Math.max(1, Math.ceil(n / blockCount));
+  const blocks = [];
+  for (let b = 0; b < blockCount; b++) {
+    const start = b * per;
+    const end = Math.min(n, start + per);
+    if (start >= end) break;
+    const len = end - start;
+    const off = Math.floor(rnd() * len);
+    const rot = new Array(len);
+    for (let j = 0; j < len; j++) rot[j] = enc[start + ((j + off) % len)];
+    blocks.push({ start: start, len: len, off: off, data: rot });
+  }
+
+  const ids = [];
+  while (ids.length < blocks.length + 3) {
+    const v = 2 + Math.floor(rnd() * 90000);
+    if (ids.indexOf(v) < 0) ids.push(v);
+  }
+  const initId = ids[0];
+  const blockIds = ids.slice(1, 1 + blocks.length);
+  const endId = ids[1 + blocks.length];
+  const decoyId = ids[2 + blocks.length];
+
+  const p = [];
+  p.push('local ' + nm.BL + '={' + blocks.map(function (b) { return '{' + b.data.join(',') + '}'; }).join(',') + '}');
+  p.push('local ' + nm.LEN + '={' + blocks.map(function (b) { return b.len; }).join(',') + '}');
+  p.push('local ' + nm.ORD + '={' + blocks.map(function (b) { return b.off; }).join(',') + '}');
+  p.push('local ' + nm.OUT + '={}');
+  p.push('local ' + nm.C + '=0');
+  p.push('local ' + nm.S + '=""');
+  p.push('local ' + nm.T + '=' + initId);
+  p.push('while ' + nm.T + '~=0 do');
+
+  const branch = [];
+  branch.push('if ' + nm.T + '==' + initId + ' then ' + nm.C + '=1 ' + nm.T + '=' + blockIds[0]);
+
+  blocks.forEach(function (b, bi) {
+    const nextState = bi + 1 < blocks.length ? blockIds[bi + 1] : endId;
+    const aid = 2 + Math.floor(rnd() * 97);
+    const bid = 2 + Math.floor(rnd() * 97);
+    const opaque = '(' + aid + '*' + bid + ')-(' + aid + '*' + bid + '-' + nextState + ')';
+    const L = [];
+    L.push('local ' + nm.D + '=' + nm.BL + '[' + (bi + 1) + '] local ' + nm.Q + '={}');
+    L.push('for ' + nm.I + '=1,' + nm.LEN + '[' + (bi + 1) + '] do');
+    L.push('local ' + nm.V + '=' + nm.D + '[((' + nm.I + '-1-' + nm.ORD + '[' + (bi + 1) + '])%' + b.len + ')+1]');
+    L.push('local ' + nm.P + '=' + (b.start) + '+' + nm.I);
+    L.push('local ' + nm.HX + '=((' + nm.V + '-(((' + nm.P + '*' + k1 + '+' + nm.P + '*' + nm.P + '*' + k2 + '+' + k3 + ')%256)))%256)');
+    L.push(nm.Q + '[' + nm.I + ']=string.char((' + nm.HX + '%16)*16+math.floor(' + nm.HX + '/16))');
+    L.push('end');
+    L.push(nm.OUT + '[' + (bi + 1) + ']=table.concat(' + nm.Q + ')');
+    L.push(nm.T + '=' + opaque);
+    branch.push('elseif ' + nm.T + '==' + blockIds[bi] + ' then ' + L.join(' '));
+  });
+
+  branch.push('elseif ' + nm.T + '==' + endId + ' then ' +
+    'for ' + nm.I + '=1,' + blocks.length + ' do ' + nm.S + '=' + nm.S + '..(' + nm.OUT + '[' + nm.I + '] or "") end ' +
+    'if #' + nm.S + '~=' + numLit(n, rnd) + ' then ' + nm.T + '=0 else ' +
+    'local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV ' +
+    nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)] ' +
+    'local ' + nm.RES + '=' + nm.LD + '(' + nm.S + ') if not ' + nm.RES + ' then ' + nm.T + '=0 else ' +
+    'return ' + nm.RES + '() end end');
+
+  branch.push('elseif ' + nm.T + '==' + decoyId + ' then local ' + nm.V + '=0 for ' + nm.I + '=1,3 do ' + nm.V + '=' + nm.V + '+' + nm.I + ' end ' + nm.T + '=0');
+  branch.push('else ' + nm.T + '=0 end end');
+  p.push(branch.join(' '));
+  return p.join(' ');
+}
+
+const SCHEMES = [schemeA, schemeB, schemeC, schemeD];
+
+function packBlob(src, rnd, hideErrors, rid, avoid, forceIdx) {
+  let idx = (typeof forceIdx === 'number' && forceIdx >= 0 && forceIdx < SCHEMES.length)
+    ? forceIdx
+    : Math.floor(rnd() * SCHEMES.length);
+  if (SCHEMES.length > 1 && typeof forceIdx !== 'number') {
     let guard = 0;
     while (idx === avoid && guard++ < 12) idx = Math.floor(rnd() * SCHEMES.length);
   }

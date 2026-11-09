@@ -62,7 +62,29 @@ app.use(function (req, res, next) {
   res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
   if (String(req.headers['x-forwarded-proto'] || req.protocol) === 'https') res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  if (req.path.indexOf('/api/') === 0) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+  }
+  const m = req.method;
+  if (m === 'POST' || m === 'PUT' || m === 'DELETE' || m === 'PATCH') {
+    const origin = String(req.headers.origin || '');
+    if (origin) {
+      let host = '';
+      try { host = new URL(origin).host; } catch (e) { host = ''; }
+      const self = String(req.headers.host || '');
+      if (!host || host !== self) {
+        return res.status(403).json({ error: 'Cross-origin request blocked' });
+      }
+    }
+    const ct = String(req.headers['content-type'] || '');
+    if (req.path.indexOf('/api/') === 0 && ct && ct.indexOf('application/json') < 0) {
+      return res.status(415).json({ error: 'Content-Type must be application/json' });
+    }
+  }
   next();
 });
 
@@ -250,7 +272,15 @@ function recordSignup(req, uid) {
 }
 
 function rawUrl(req, fid) {
-  return (req.headers['x-forwarded-proto'] || req.protocol) + '://' + req.headers.host + '/raw/' + fid;
+  const f = ownGet(db.files, fid);
+  const base = (req.headers['x-forwarded-proto'] || req.protocol) + '://' + req.headers.host + '/raw/' + fid;
+  if (f && !isPub(f)) return base + '?k=' + rawKeyFor(f);
+  return base;
+}
+
+function rawKeyFor(f) {
+  if (!f.rawKey) f.rawKey = id(18);
+  return f.rawKey;
 }
 
 function isPub(o) { return (o.visibility || 'public') === 'public'; }
@@ -667,12 +697,35 @@ app.post('/api/signup', limiter, function (req, res) {
   res.status(201).json({ ok: true, user: { id: uid, username: username, nick: '', avatar: '' } });
 });
 
+const loginFails = new Map();
+const LOGIN_MAX = Math.max(3, Number(process.env.LOGIN_MAX_FAILS) || 10);
+const LOGIN_WINDOW = 15 * 60 * 1000;
+
+function loginBlocked(key) {
+  const rec = loginFails.get(key);
+  if (!rec) return false;
+  if (Date.now() - rec.first > LOGIN_WINDOW) { loginFails.delete(key); return false; }
+  return rec.n >= LOGIN_MAX;
+}
+function loginFail(key) {
+  const rec = loginFails.get(key);
+  if (!rec || Date.now() - rec.first > LOGIN_WINDOW) loginFails.set(key, { n: 1, first: Date.now() });
+  else rec.n++;
+  if (loginFails.size > 5000) loginFails.clear();
+}
+
 app.post('/api/login', limiter, function (req, res) {
   const username = String((req.body || {}).username || '').trim().toLowerCase();
   const password = String((req.body || {}).password || '');
+  const lkey = username + '|' + realIp(req);
+  if (loginBlocked(lkey)) return res.status(429).json({ error: 'ลองผิดหลายครั้งเกินไป รอ 15 นาทีแล้วลองใหม่' });
   let found = null;
   for (const u of Object.values(db.users)) if (u.username === username) found = u;
-  if (!found || !verify(password, found.hash)) return res.status(401).json({ error: 'Invalid username or password' });
+  if (!found || !verify(password, found.hash)) {
+    loginFail(lkey);
+    return res.status(401).json({ error: 'Invalid username or password' });
+  }
+  loginFails.delete(lkey);
   setSession(res, found.id);
   res.json({ ok: true, user: { id: found.id, username: found.username, nick: found.nick || '', avatar: found.avatar || '' } });
 });
@@ -934,7 +987,7 @@ app.post('/api/files', auth, function (req, res) {
   const now = Date.now();
   const folder = req.body.folder && ownGet(db.folders, String(req.body.folder)) ? String(req.body.folder) : null;
   const vis = req.body.visibility === 'private' ? 'private' : 'public';
-  const f = { id: fid, owner: req.user.id, name: name, code: code, created: now, updated: now, shares: [], invites: [], history: [], folder: folder, visibility: vis };
+  const f = { id: fid, owner: req.user.id, name: name, code: code, created: now, updated: now, shares: [], invites: [], history: [], folder: folder, visibility: vis, rawKey: id(18) };
   if (folder) {
     const fo = db.folders[folder];
     if (fo.owner === req.user.id) { fo.files = fo.files || []; if (fo.files.indexOf(fid) < 0) fo.files.push(fid); fo.updated = now; }
@@ -1289,6 +1342,15 @@ app.post('/api/favorites', auth, function (req, res) {
 app.get('/raw/:id', function (req, res) {
   const f = ownGet(db.files, req.params.id);
   if (!f) return res.status(404).send('Not found');
+  if (!isPub(f)) {
+    const key = String(req.query.k || '');
+    let allowed = !!key && !!f.rawKey && key === f.rawKey;
+    if (!allowed) {
+      const who = userFromReq(req);
+      if (who && canView(f, who)) allowed = true;
+    }
+    if (!allowed) return res.status(404).send('Not found');
+  }
   const accept = String(req.headers.accept || '').toLowerCase();
   const ua = String(req.headers['user-agent'] || '').toLowerCase();
   const isBrowser = accept.includes('text/html') && !ua.includes('roblox') && !ua.includes('httpget') && !ua.includes('wininet') && req.query.raw !== '1';
