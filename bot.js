@@ -54,8 +54,14 @@ const EMOJI_PREMIUM = process.env.EMOJI_PREMIUM || '<:emoji_19:15692020320095519
 const EMOJI_LV = process.env.EMOJI_LV || '<:emoji_18:1569201995204530276>';
 const EMOJI_TIMES = process.env.EMOJI_TIMES || '<:emoji_20:1569202137454477443>';
 const EMOJI_CROWN = process.env.EMOJI_CROWN || '<:emoji_21:1569202166948831262>';
+const EMOJI_1M = process.env.EMOJI_1M || '<:emoji_24:1569340565290483752>';
+const EMOJI_1Y = process.env.EMOJI_1Y || '<:emoji_23:1569340427667116193>';
+const PRICE_1M = Number(process.env.PRICE_1M) || 25;
+const PRICE_1Y = Number(process.env.PRICE_1Y) || 220;
 const EMOJI_VERIFY_ID = (String(EMOJI_VERIFY).match(/:(\d+)>/) || [])[1] || '';
 const EMOJI_PREMIUM_ID = (String(EMOJI_PREMIUM).match(/:(\d+)>/) || [])[1] || '';
+const EMOJI_1M_ID = (String(EMOJI_1M).match(/:(\d+)>/) || [])[1] || '';
+const EMOJI_1Y_ID = (String(EMOJI_1Y).match(/:(\d+)>/) || [])[1] || '';
 const CODE_GIF_URL = process.env.CODE_GIF_URL || 'https://cdn.discordapp.com/attachments/1568081274344570880/1569137031509057657/image0.gif';
 
 const PURPLE = 0x9b59b6;
@@ -220,6 +226,17 @@ function saveRoomState() {
   try { fs.writeFileSync(PREMIUM_STATE, JSON.stringify(roomState, null, 2)); } catch (e) {}
 }
 
+function isRoomOwner(member, channelId) {
+  const st = roomState[channelId];
+  return !!(st && member && st.owner === member.id);
+}
+
+function canUseRoom(member, channelId, staffOnly) {
+  if (isStaff(member)) return true;
+  if (staffOnly) return false;
+  return isRoomOwner(member, channelId);
+}
+
 function isStaff(member) {
   if (!member || !member.roles) return false;
   if (member.permissions && member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
@@ -247,15 +264,17 @@ function roomPayload(channelId) {
     .setColor(0xf1c40f)
     .setDescription(
       '**ชื่อบัญชีเว็บ:** ' + (st.username ? '`' + st.username + '`' : 'ยังไม่ได้กรอก') + '\n' +
-      '**แพ็กเกจ:** ' + (st.plan === '1y' ? '1 ปี' : (st.plan === '1m' ? '1 เดือน' : 'ยังไม่ได้เลือก')) + '\n\n' +
-      'ขั้นตอน: กด **กรอกชื่อบัญชี** → เลือกแพ็กเกจ → พนักงานกดปุ่ม **ยืนยันให้พรีเมียม**'
+      '**แพ็กเกจ:** ' + (st.plan === '1y' ? (EMOJI_1Y + ' 1 ปี · ' + PRICE_1Y + ' บาท') : (st.plan === '1m' ? (EMOJI_1M + ' 1 เดือน · ' + PRICE_1M + ' บาท') : 'ยังไม่ได้เลือก')) + '\n\n' +
+      '**ราคา**\n' + EMOJI_1M + ' 1 เดือน — ' + PRICE_1M + ' บาท\n' + EMOJI_1Y + ' 1 ปี — ' + PRICE_1Y + ' บาท\n\n' +
+      'ขั้นตอน: กรอกชื่อบัญชีเว็บ → พนักงานเลือกแพ็กเกจ → พนักงานกด **ยืนยันให้พรีเมียม**'
     )
     .setFooter({ text: 'ปิดห้องได้เมื่อให้พรีเมียมเสร็จ' });
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('prem_user').setLabel('กรอกชื่อบัญชี').setEmoji('👤').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('prem_1m').setLabel('1 เดือน').setEmoji('🗓️').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('prem_1y').setLabel('1 ปี').setEmoji('📅').setStyle(ButtonStyle.Secondary)
-  );
+  const b1 = new ButtonBuilder().setCustomId('prem_user').setLabel('กรอกชื่อบัญชี').setEmoji('👤').setStyle(ButtonStyle.Primary);
+  const b2 = new ButtonBuilder().setCustomId('prem_1m').setLabel('1 เดือน · ' + PRICE_1M + ' บาท').setStyle(ButtonStyle.Secondary);
+  const b3 = new ButtonBuilder().setCustomId('prem_1y').setLabel('1 ปี · ' + PRICE_1Y + ' บาท').setStyle(ButtonStyle.Secondary);
+  if (EMOJI_1M_ID) b2.setEmoji(EMOJI_1M_ID);
+  if (EMOJI_1Y_ID) b3.setEmoji(EMOJI_1Y_ID);
+  const row1 = new ActionRowBuilder().addComponents(b1, b2, b3);
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('prem_apply').setLabel('ยืนยันให้พรีเมียม').setEmoji('✅').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('prem_close').setLabel('ปิดห้อง').setEmoji('🔒').setStyle(ButtonStyle.Danger)
@@ -276,9 +295,12 @@ async function ensurePremiumPanel() {
       .setColor(0xf1c40f)
       .setDescription(
         '**สิทธิพิเศษ**\n' +
-        EMOJI_LV + ' ใช้ปกปิดโค้ดได้ทุกระดับ 1-5\n' +
+        EMOJI_LV + ' ใช้ปกปิดโค้ดได้ทุกระดับ 1-6\n' +
         EMOJI_TIMES + ' ปกปิดได้ 10 ครั้ง/วัน (ฟรี 5 ครั้ง)\n' +
         EMOJI_CROWN + ' ไอคอนมงกุฎหลังชื่อ\n\n' +
+        '**ราคา**\n' +
+        EMOJI_1M + ' 1 เดือน — **' + PRICE_1M + ' บาท**\n' +
+        EMOJI_1Y + ' 1 ปี — **' + PRICE_1Y + ' บาท**\n\n' +
         'กดปุ่มด้านล่างเพื่อเปิดห้องสมัคร'
       );
     if (file) embed.setImage('attachment://premium.jpg');
@@ -598,6 +620,9 @@ client.on('interactionCreate', async function (interaction) {
     }
 
     if (interaction.isButton() && interaction.customId === 'prem_user') {
+      if (!canUseRoom(interaction.member, interaction.channelId, false)) {
+        return interaction.reply({ content: 'เฉพาะเจ้าของห้องหรือพนักงานเท่านั้น', flags: MessageFlags.Ephemeral });
+      }
       const modal = new ModalBuilder().setCustomId('prem_user_modal').setTitle('ชื่อบัญชีเว็บ');
       const input = new TextInputBuilder()
         .setCustomId('username')
@@ -613,6 +638,9 @@ client.on('interactionCreate', async function (interaction) {
     }
 
     if (interaction.isModalSubmit() && interaction.customId === 'prem_user_modal') {
+      if (!canUseRoom(interaction.member, interaction.channelId, false)) {
+        return interaction.reply({ content: 'เฉพาะเจ้าของห้องหรือพนักงานเท่านั้น', flags: MessageFlags.Ephemeral });
+      }
       const st = roomState[interaction.channelId];
       if (!st) return interaction.reply({ content: 'ไม่พบข้อมูลห้องนี้', flags: MessageFlags.Ephemeral });
       st.username = interaction.fields.getTextInputValue('username').trim().toLowerCase();
@@ -622,6 +650,9 @@ client.on('interactionCreate', async function (interaction) {
     }
 
     if (interaction.isButton() && (interaction.customId === 'prem_1m' || interaction.customId === 'prem_1y')) {
+      if (!isStaff(interaction.member)) {
+        return interaction.reply({ content: 'เฉพาะพนักงานเท่านั้นที่เลือกแพ็กเกจได้', flags: MessageFlags.Ephemeral });
+      }
       const st = roomState[interaction.channelId];
       if (!st) return interaction.reply({ content: 'ไม่พบข้อมูลห้องนี้', flags: MessageFlags.Ephemeral });
       st.plan = interaction.customId === 'prem_1y' ? '1y' : '1m';
