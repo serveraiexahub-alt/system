@@ -48,6 +48,14 @@ const PREMIUM_IMG_FILE = path.join(__dirname, 'assets', 'premium.jpg');
 const STAFF_ROLES = String(process.env.STAFF_ROLES || '1568617536038248579,1565637911829811290,1407171324144783402,1568617785347543171')
   .split(',').map(function (x) { return x.trim(); }).filter(Boolean);
 const PREMIUM_STATE = path.join(__dirname, 'premium-state.json');
+const PREMIUM_ROLE_ID = process.env.PREMIUM_ROLE_ID || '1569204641298915358';
+const EMOJI_VERIFY = process.env.EMOJI_VERIFY || '<:emoji_22:1569203851104493682>';
+const EMOJI_PREMIUM = process.env.EMOJI_PREMIUM || '<:emoji_19:1569202032009551912>';
+const EMOJI_LV = process.env.EMOJI_LV || '<:emoji_18:1569201995204530276>';
+const EMOJI_TIMES = process.env.EMOJI_TIMES || '<:emoji_20:1569202137454477443>';
+const EMOJI_CROWN = process.env.EMOJI_CROWN || '<:emoji_21:1569202166948831262>';
+const EMOJI_VERIFY_ID = (String(EMOJI_VERIFY).match(/:(\d+)>/) || [])[1] || '';
+const EMOJI_PREMIUM_ID = (String(EMOJI_PREMIUM).match(/:(\d+)>/) || [])[1] || '';
 const CODE_GIF_URL = process.env.CODE_GIF_URL || 'https://cdn.discordapp.com/attachments/1568081274344570880/1569137031509057657/image0.gif';
 
 const PURPLE = 0x9b59b6;
@@ -231,7 +239,7 @@ async function webPremium(username, plan) {
 function roomPayload(channelId) {
   const st = roomState[channelId] || {};
   const embed = new EmbedBuilder()
-    .setTitle('💎 ห้องสมัครพรีเมียม')
+    .setTitle(EMOJI_PREMIUM + ' ห้องสมัครพรีเมียม')
     .setColor(0xf1c40f)
     .setDescription(
       '**ชื่อบัญชีเว็บ:** ' + (st.username ? '`' + st.username + '`' : 'ยังไม่ได้กรอก') + '\n' +
@@ -260,18 +268,18 @@ async function ensurePremiumPanel() {
       if (fs.existsSync(PREMIUM_IMG_FILE)) file = new AttachmentBuilder(fs.readFileSync(PREMIUM_IMG_FILE), { name: 'premium.jpg' });
     } catch (e) {}
     const embed = new EmbedBuilder()
-      .setTitle('💎 สมัครพรีเมียม')
+      .setTitle(EMOJI_PREMIUM + ' สมัครพรีเมียม')
       .setColor(0xf1c40f)
       .setDescription(
         '**สิทธิพิเศษ**\n' +
-        '👑 ใช้ปกปิดโค้ดได้ทุกระดับ (1-5)\n' +
-        '🔟 ปกปิดได้ 10 ครั้ง/วัน (ฟรี 5 ครั้ง)\n' +
-        '✨ ไอคอนมงกุฎหลังชื่อ\n\n' +
+        EMOJI_LV + ' ใช้ปกปิดโค้ดได้ทุกระดับ 1-5\n' +
+        EMOJI_TIMES + ' ปกปิดได้ 10 ครั้ง/วัน (ฟรี 5 ครั้ง)\n' +
+        EMOJI_CROWN + ' ไอคอนมงกุฎหลังชื่อ\n\n' +
         'กดปุ่มด้านล่างเพื่อเปิดห้องสมัคร'
       );
     if (file) embed.setImage('attachment://premium.jpg');
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('prem_open').setLabel('เปิดห้องสมัครพรีเมียม').setEmoji('💎').setStyle(ButtonStyle.Success)
+      new ButtonBuilder().setCustomId('prem_open').setLabel('เปิดห้องสมัครพรีเมียม').setEmoji(EMOJI_PREMIUM_ID || '💎').setStyle(ButtonStyle.Success)
     );
     const payload = { embeds: [embed], components: [row] };
     if (file) payload.files = [file];
@@ -331,7 +339,7 @@ async function ensureWebPanel() {
     if (!channel) { console.log('❌ ไม่พบช่องยืนยันบัญชีเว็บ'); return; }
     const gif = codeGifFile();
     const embed = new EmbedBuilder()
-      .setTitle('🔑 ยืนยันรหัส')
+      .setTitle(EMOJI_VERIFY + ' ยืนยันรหัส')
       .setDescription(
         'กดปุ่มด้านล่างแล้วใส่รหัสที่เว็บให้มา\n\n' +
         'ตัวอย่างรหัส: `HUB-AB12-CD34`\n' +
@@ -342,7 +350,7 @@ async function ensureWebPanel() {
     if (gif) embed.setImage('attachment://verify-code.gif');
     else embed.setImage(CODE_GIF_URL);
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('hub_verify_button').setLabel('ยืนยันรหัส').setStyle(ButtonStyle.Primary)
+      new ButtonBuilder().setCustomId('hub_verify_button').setLabel('ยืนยันรหัส').setStyle(ButtonStyle.Primary) .setEmoji(EMOJI_VERIFY_ID)
     );
     const payload = { embeds: [embed], components: [row] };
     if (gif) payload.files = [gif];
@@ -549,9 +557,23 @@ client.on('interactionCreate', async function (interaction) {
         return interaction.editReply({ content: 'ให้พรีเมียมไม่สำเร็จ: ' + (r.data.error || 'unknown') });
       }
       const untilTs = Math.floor(Number(r.data.until || 0) / 1000);
+      let roleNote = '';
+      const targetId = String(r.data.discordId || '') || (st.owner !== interaction.user.id ? '' : interaction.user.id);
+      if (PREMIUM_ROLE_ID && targetId) {
+        try {
+          const m = await interaction.guild.members.fetch(targetId);
+          await m.roles.add(PREMIUM_ROLE_ID);
+          roleNote = '\n' + EMOJI_CROWN + ' ให้ยศ <@&' + PREMIUM_ROLE_ID + '> แล้ว';
+        } catch (e) {
+          console.error('premium role failed:', e.message);
+          roleNote = '\n⚠️ ให้ยศไม่สำเร็จ (เช็ก Manage Roles / ลำดับยศบอท)';
+        }
+      } else if (PREMIUM_ROLE_ID) {
+        roleNote = '\n⚠️ บัญชีนี้ยังไม่ผูก Discord จึงยังให้ยศไม่ได้';
+      }
       await interaction.editReply({
-        content: '✅ ให้พรีเมียม **' + st.username + '** แพ็กเกจ ' + (st.plan === '1y' ? '1 ปี' : '1 เดือน') +
-          ' แล้ว\nหมดอายุ <t:' + untilTs + ':F>'
+        content: EMOJI_PREMIUM + ' ให้พรีเมียม **' + st.username + '** แพ็กเกจ ' + (st.plan === '1y' ? '1 ปี' : '1 เดือน') +
+          ' แล้ว\nหมดอายุ <t:' + untilTs + ':F>' + roleNote
       });
       st.done = true;
       saveRoomState();
@@ -712,5 +734,40 @@ client.on('guildMemberRemove', async function (member) {
     console.error('❌ ส่งข้อความคนออกไม่สำเร็จ:', err.message);
   }
 });
+
+async function checkExpiredPremium() {
+  try {
+    const res = await fetch(WEB_URL + '/api/discord/premium/expiring', {
+      method: 'GET',
+      headers: { 'x-bot-secret': BOT_SECRET }
+    });
+    if (!res.ok) return;
+    const data = await res.json().catch(function () { return {}; });
+    const list = data.users || [];
+    if (!list.length) return;
+    const guild = client.guilds.cache.first();
+    if (!guild) return;
+    for (const item of list) {
+      try {
+        if (item.discordId && PREMIUM_ROLE_ID) {
+          const m = await guild.members.fetch(item.discordId).catch(function () { return null; });
+          if (m) await m.roles.remove(PREMIUM_ROLE_ID).catch(function () {});
+        }
+        await fetch(WEB_URL + '/api/discord/premium/cleared', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
+          body: JSON.stringify({ username: item.username })
+        }).catch(function () {});
+        console.log('⌛ ปลดพรีเมียม: ' + item.username);
+      } catch (e) {
+        console.error('expire failed:', item.username, e.message);
+      }
+    }
+  } catch (e) {
+    console.error('expire check failed:', e.message);
+  }
+}
+
+setInterval(checkExpiredPremium, 5 * 60 * 1000);
 
 client.login(TOKEN);

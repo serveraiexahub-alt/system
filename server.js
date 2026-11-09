@@ -515,8 +515,12 @@ app.post('/api/discord/premium', function (req, res) {
   u.premiumUntil = base + days * 24 * 60 * 60 * 1000;
   u.premiumPlan = plan;
   u.premiumUpdated = Date.now();
+  u.premiumRole = true;
   save();
-  res.json({ ok: true, username: u.username, plan: plan, until: u.premiumUntil });
+  res.json({
+    ok: true, username: u.username, plan: plan, until: u.premiumUntil,
+    discordId: String(u.discordId || ''), premium: isPremium(u)
+  });
 });
 
 app.post('/api/discord/premium/status', function (req, res) {
@@ -528,6 +532,34 @@ app.post('/api/discord/premium/status', function (req, res) {
   }
   if (!uid) return res.status(404).json({ error: 'not found' });
   res.json({ ok: true, username: username, premium: isPremium(db.users[uid]), until: Number(db.users[uid].premiumUntil || 0) });
+});
+
+app.get('/api/discord/premium/expiring', function (req, res) {
+  if (!botAuth(req, res)) return;
+  const now = Date.now();
+  const out = [];
+  for (const k of Object.keys(db.users)) {
+    const u = db.users[k];
+    if (!u.premiumRole) continue;
+    if (Number(u.premiumUntil || 0) > now) continue;
+    out.push({ username: u.username, discordId: String(u.discordId || ''), until: Number(u.premiumUntil || 0) });
+    if (out.length >= 200) break;
+  }
+  res.json({ ok: true, users: out });
+});
+
+app.post('/api/discord/premium/cleared', function (req, res) {
+  if (!botAuth(req, res)) return;
+  const username = String((req.body || {}).username || '').trim().toLowerCase();
+  let uid = null;
+  for (const k of Object.keys(db.users)) {
+    if (db.users[k].username === username) { uid = k; break; }
+  }
+  if (!uid) return res.status(404).json({ error: 'not found' });
+  db.users[uid].premiumRole = false;
+  db.users[uid].premiumUntil = 0;
+  save();
+  res.json({ ok: true });
 });
 
 app.post('/api/discord/verify', function (req, res) {

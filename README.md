@@ -129,3 +129,19 @@ POST /api/discord/premium/status  { username }
 
 ถ้ากรอกเลขถูกแต่ไม่ผ่าน ให้เช็คว่าเวอร์ชัน `captcha.js` เป็นตัวที่รับ `value`
 (บั๊กเก่า: รูปสุ่มเลขเองแต่ไปเทียบกับอีกรหัสหนึ่ง — แก้แล้ว)
+
+## ยศพรีเมียม
+
+- ตอนให้พรีเมียม บอทจะให้ยศ `PREMIUM_ROLE_ID` กับ Discord ที่ผูกกับบัญชีนั้น
+- บอทเช็คทุก 5 นาที ถ้าพรีเมียมหมดอายุ → ถอดยศ + ตั้ง `premiumUntil=0` อัตโนมัติ
+
+API ที่บอทใช้:
+```
+GET  /api/discord/premium/expiring   -> รายชื่อที่หมดอายุแล้ว
+POST /api/discord/premium/cleared    -> ยืนยันว่าถอดยศแล้ว
+```
+
+## อีโมจิ
+
+ตั้งได้ใน `.env` (`EMOJI_VERIFY`, `EMOJI_PREMIUM`, `EMOJI_LV`, `EMOJI_TIMES`, `EMOJI_CROWN`)
+รูปแบบ `<:ชื่อ:id>` — ถ้าไม่ตั้งจะใช้ค่าเริ่มต้น
