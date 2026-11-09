@@ -34,6 +34,7 @@ const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
 const APP_NAME = 'สกัด HUB';
 const SESSION_DAYS = 30;
 const MAX_CODE = 10 * 1024 * 1024;
+const MAX_CODE_PREMIUM = Math.max(MAX_CODE, Number(process.env.MAX_CODE_PREMIUM) || 20 * 1024 * 1024);
 const MAX_INPUT = 2 * 1024 * 1024;
 const OBF_DAILY_LIMIT = Math.max(1, Number(process.env.OBF_DAILY_LIMIT) || 5);
 const PREMIUM_DAILY_LIMIT = Math.max(1, Number(process.env.PREMIUM_DAILY_LIMIT) || 10);
@@ -54,7 +55,7 @@ const SECRET = process.env.SECRET || loadSecret();
 
 app.disable('x-powered-by');
 app.set('trust proxy', String(process.env.TRUST_PROXY || '1') !== '0');
-app.use(express.json({ limit: '14mb' }));
+app.use(express.json({ limit: '28mb' }));
 app.use(function (req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -961,8 +962,9 @@ app.post('/api/obfuscate', auth, function (req, res) {
 
   obfConsume(req.user.id);
   const after = obfQuota(req.user.id);
-  if (finalCode.length > MAX_CODE) {
-    return res.status(413).json({ error: 'Output exceeds 10 MB, lower the difficulty level.', left: after.left });
+  const obfLim = prem ? MAX_CODE_PREMIUM : MAX_CODE;
+  if (finalCode.length > obfLim) {
+    return res.status(413).json({ error: 'ผลลัพธ์เกิน ' + Math.floor(obfLim / 1048576) + ' MB — ลดระดับความยากลง', left: after.left });
   }
   const result = { ok: true, code: finalCode, stats: out.stats, level: level, remote: remote, left: after.left, limit: after.limit, premium: prem };
   if (body.save === true) {
@@ -1023,10 +1025,11 @@ function badText(t) {
 app.post('/api/files', auth, function (req, res) {
   const name = String((req.body || {}).name || '').trim();
   const code = String((req.body || {}).code || '');
+  const lim = isPremium(ownGet(db.users, req.user.id)) ? MAX_CODE_PREMIUM : MAX_CODE;
   if (!name) return res.status(400).json({ error: 'File name is required' });
   if (badText(code)) return res.status(400).json({ error: 'File looks binary, only text scripts are allowed' });
   if (name.length > MAX_NAME) return res.status(400).json({ error: 'File name too long' });
-  if (code.length > MAX_CODE) return res.status(413).json({ error: 'Code exceeds 10 MB limit' });
+  if (code.length > lim) return res.status(413).json({ error: 'ไฟล์ใหญ่เกิน ' + Math.floor(lim / 1048576) + ' MB' + (isPremium(ownGet(db.users, req.user.id)) ? '' : ' (พรีเมียมได้ถึง 20 MB)') });
   const fid = id(8);
   const now = Date.now();
   const folder = req.body.folder && ownGet(db.folders, String(req.body.folder)) ? String(req.body.folder) : null;
@@ -1057,7 +1060,8 @@ app.put('/api/files/:id', auth, badKey, function (req, res) {
   const code = body.code !== undefined ? String(body.code) : f.code;
   if (!name) return res.status(400).json({ error: 'File name is required' });
   if (name.length > MAX_NAME) return res.status(400).json({ error: 'File name too long' });
-  if (code.length > MAX_CODE) return res.status(413).json({ error: 'Code exceeds 10 MB limit' });
+  const uLim = isPremium(ownGet(db.users, req.user.id)) ? MAX_CODE_PREMIUM : MAX_CODE;
+  if (code.length > uLim) return res.status(413).json({ error: 'ไฟล์ใหญ่เกิน ' + Math.floor(uLim / 1048576) + ' MB' });
   if (body.code !== undefined && badText(code)) return res.status(400).json({ error: 'File looks binary, only text scripts are allowed' });
   if (body.code !== undefined) pushHistory(f, diffStat(f.code, code));
   f.name = name;

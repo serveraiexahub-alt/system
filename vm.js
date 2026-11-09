@@ -1,4 +1,5 @@
 'use strict';
+const T = {"Local": 1, "LocalFunc": 2, "Set": 3, "FuncDecl": 4, "CallStat": 5, "If": 6, "While": 7, "Repeat": 8, "NumFor": 9, "GenFor": 10, "Do": 11, "Return": 12, "Break": 13, "Num": 14, "Str": 15, "Nil": 16, "True": 17, "False": 18, "Vararg": 19, "Name": 20, "Index": 21, "Bin": 22, "Un": 23, "Table": 24, "Func": 25, "Call": 26, "Invoke": 27};
 // Lua 5.1/Luau subset parser -> compact AST
 function parseLua(tokens) {
   let i = 0;
@@ -35,20 +36,20 @@ function parseLua(tokens) {
             i++;
             const name = next().v;
             const fn = parseFuncBody();
-            return ['LocalFunc', name, fn];
+            return [T.LocalFunc, name, fn];
           }
           const names = [next().v];
           while (optOp(',')) names.push(next().v);
           let exprs = [];
           if (optOp('=')) exprs = parseExprList();
-          return ['Local', names, exprs];
+          return [T.Local, names, exprs];
         }
         case 'function': {
           i++;
           const path = [next().v];
           while (isOp('.') || isOp(':')) { const sep = next().v; path.push(next().v); if (sep === ':') { path.method = true; break; } }
           const fn = parseFuncBody(path.method);
-          return ['FuncDecl', path, fn];
+          return [T.FuncDecl, path, fn];
         }
         case 'if': {
           i++;
@@ -66,7 +67,7 @@ function parseLua(tokens) {
           let elseB = null;
           if (isKw('else')) { i++; elseB = parseBlock(['end']); }
           eatKw('end');
-          return ['If', cond, thenB, elses, elseB];
+          return [T.If, cond, thenB, elses, elseB];
         }
         case 'while': {
           i++;
@@ -74,14 +75,14 @@ function parseLua(tokens) {
           eatKw('do');
           const body = parseBlock(['end']);
           eatKw('end');
-          return ['While', cond, body];
+          return [T.While, cond, body];
         }
         case 'repeat': {
           i++;
           const body = parseBlock(['until']);
           eatKw('until');
           const cond = parseExpr();
-          return ['Repeat', body, cond];
+          return [T.Repeat, body, cond];
         }
         case 'for': {
           i++;
@@ -95,7 +96,7 @@ function parseLua(tokens) {
             eatKw('do');
             const body = parseBlock(['end']);
             eatKw('end');
-            return ['NumFor', first, start, stop, step, body];
+            return [T.NumFor, first, start, stop, step, body];
           }
           const names = [first];
           while (optOp(',')) names.push(next().v);
@@ -104,13 +105,13 @@ function parseLua(tokens) {
           eatKw('do');
           const body = parseBlock(['end']);
           eatKw('end');
-          return ['GenFor', names, exprs, body];
+          return [T.GenFor, names, exprs, body];
         }
         case 'do': {
           i++;
           const body = parseBlock(['end']);
           eatKw('end');
-          return ['Do', body];
+          return [T.Do, body];
         }
         case 'return': {
           i++;
@@ -120,9 +121,9 @@ function parseLua(tokens) {
             if (!(peek() && peek().t === 'op' && peek().v === ';')) exprs.push.apply(exprs, parseExprList());
           }
           optOp(';');
-          return ['Return', exprs];
+          return [T.Return, exprs];
         }
-        case 'break': { i++; return ['Break']; }
+        case 'break': { i++; return [T.Break]; }
         case 'goto': { i++; return null; }
         default: break;
       }
@@ -137,15 +138,15 @@ function parseLua(tokens) {
       while (optOp(',')) targets.push(toLHS(parseSuffixed()));
       eatOp('=');
       const values = parseExprList();
-      return ['Set', targets, values];
+      return [T.Set, targets, values];
     }
-    if (expr[0] !== 'Call' && expr[0] !== 'Invoke') throw new Error('statement is not a call');
-    return ['CallStat', expr];
+    if (expr[0] !== T.Call && expr[0] !== T.Invoke) throw new Error('statement is not a call');
+    return [T.CallStat, expr];
   }
 
   function toLHS(e) {
-    if (e[0] === 'Name') return ['Name', e[1]];
-    if (e[0] === 'Index') return e;
+    if (e[0] === T.Name) return [T.Name, e[1]];
+    if (e[0] === T.Index) return e;
     throw new Error('bad assignment target');
   }
 
@@ -173,11 +174,11 @@ function parseLua(tokens) {
     if (t.t === 'op' && UNARY[t.v]) {
       i++;
       const operand = parseExpr(UNARY[t.v]);
-      left = ['Un', t.v, operand];
+      left = [T.Un, t.v, operand];
     } else if (t.t === 'kw' && t.v === 'not') {
       i++;
       const operand = parseExpr(UNARY.not);
-      left = ['Un', 'not', operand];
+      left = [T.Un, 'not', operand];
     } else {
       left = parseSimple();
     }
@@ -191,7 +192,7 @@ function parseLua(tokens) {
       if (lp <= limit) break;
       i++;
       const right = parseExpr(rp);
-      left = ['Bin', opv, left, right];
+      left = [T.Bin, opv, left, right];
     }
     return left;
   }
@@ -199,17 +200,17 @@ function parseLua(tokens) {
   function parseSimple() {
     const t = peek();
     if (!t) throw new Error('unexpected eof');
-    if (t.t === 'num') { i++; return ['Num', t.raw]; }
-    if (t.t === 'str') { i++; return t.long ? ['Str', t.v] : ['Str', t.v]; }
+    if (t.t === 'num') { i++; return [T.Num, t.raw]; }
+    if (t.t === 'str') { i++; return t.long ? [T.Str, t.v] : [T.Str, t.v]; }
     if (t.t === 'kw') {
-      if (t.v === 'nil') { i++; return ['Nil']; }
-      if (t.v === 'true') { i++; return ['True']; }
-      if (t.v === 'false') { i++; return ['False']; }
+      if (t.v === 'nil') { i++; return [T.Nil]; }
+      if (t.v === 'true') { i++; return [T.True]; }
+      if (t.v === 'false') { i++; return [T.False]; }
       if (t.v === 'function') { i++; return parseFuncBody(); }
       throw new Error('unexpected keyword ' + t.v);
     }
     if (t.t === 'op') {
-      if (t.v === '...') { i++; return ['Vararg']; }
+      if (t.v === '...') { i++; return [T.Vararg]; }
       if (t.v === '{') return parseTable();
     }
     return parseSuffixed();
@@ -217,7 +218,7 @@ function parseLua(tokens) {
 
   function parsePrimary() {
     const t = peek();
-    if (t && t.t === 'name') { i++; return ['Name', t.v]; }
+    if (t && t.t === 'name') { i++; return [T.Name, t.v]; }
     if (t && t.t === 'op' && t.v === '(') { i++; const e = parseExpr(); eatOp(')'); return e; }
     throw new Error('unexpected token in primary');
   }
@@ -225,10 +226,10 @@ function parseLua(tokens) {
   function parseSuffixed() {
     let e = parsePrimary();
     for (;;) {
-      if (isOp('.')) { i++; const n = next().v; e = ['Index', e, ['Str', n]]; }
-      else if (isOp('[')) { i++; const k = parseExpr(); eatOp(']'); e = ['Index', e, k]; }
-      else if (isOp(':')) { i++; const n = next().v; const args = parseArgs(); e = ['Invoke', e, n, args]; }
-      else if (isOp('(') || isOp('{') || (peek() && peek().t === 'str')) { const args = parseArgs(); e = ['Call', e, args]; }
+      if (isOp('.')) { i++; const n = next().v; e = [T.Index, e, [T.Str, n]]; }
+      else if (isOp('[')) { i++; const k = parseExpr(); eatOp(']'); e = [T.Index, e, k]; }
+      else if (isOp(':')) { i++; const n = next().v; const args = parseArgs(); e = [T.Invoke, e, n, args]; }
+      else if (isOp('(') || isOp('{') || (peek() && peek().t === 'str')) { const args = parseArgs(); e = [T.Call, e, args]; }
       else break;
     }
     return e;
@@ -245,7 +246,7 @@ function parseLua(tokens) {
     if (isOp('{')) return [parseTable()];
     const t = next();
     if (t.t !== 'str') throw new Error('bad call args');
-    return [['Str', t.v]];
+    return [[T.Str, t.v]];
   }
 
   function parseTable() {
@@ -260,14 +261,14 @@ function parseLua(tokens) {
         items.push([k, parseExpr()]);
       } else if (peek() && peek().t === 'name' && toks[i + 1] && toks[i + 1].t === 'op' && toks[i + 1].v === '=') {
         const name = next().v; i++;
-        items.push([['Str', name], parseExpr()]);
+        items.push([[T.Str, name], parseExpr()]);
       } else {
         items.push([null, parseExpr()]);
       }
       if (!optOp(',') && !optOp(';')) break;
     }
     eatOp('}');
-    return ['Table', items];
+    return [T.Table, items];
   }
 
   function parseFuncBody(isMethod) {
@@ -283,7 +284,7 @@ function parseLua(tokens) {
     eatOp(')');
     const body = parseBlock(['end']);
     eatKw('end');
-    return ['Func', params, vararg, body];
+    return [T.Func, params, vararg, body];
   }
 
   const ast = parseBlock([]);
@@ -319,9 +320,47 @@ function toLua(value) {
 }
 
 const VM_RUNTIME = `
-local __U = table.unpack or unpack
-local __G = (getfenv and getfenv()) or _ENV
-local function __pack(...) return {n = select('#', ...), ...} end
+local _G = (getfenv and getfenv()) or _ENV
+local _U = table.unpack or unpack
+local _sel = select
+local _type = type
+local _tonum = tonumber
+local _tostr = tostring
+local _err = error
+local _pcall = pcall
+local _char = string.char
+local _sub = string.sub
+local _find = string.find
+local _fmt = string.format
+local _concat = table.concat
+local _floor = math.floor
+local _insert = table.insert
+local _rawget = rawget
+local _rawequal = rawequal
+local _getup = nil
+local _hookfn = nil
+local _getinfo = nil
+do
+  local d = _G.debug
+  if _type(d) == "table" then
+    _getup = d.getupvalue
+    _hookfn = d.sethook
+    _getinfo = d.getinfo
+  end
+end
+local function _canary()
+  if _char(65) ~= "A" then return false end
+  if _sub("abcd", 2, 3) ~= "bc" then return false end
+  if _floor(1.75) ~= 1 then return false end
+  if _concat({"a", "b"}) ~= "ab" then return false end
+  if _tonum("12") ~= 12 then return false end
+  if _type(_G) ~= "table" then return false end
+  if _rawget(_G, "string") ~= nil and _rawget(_rawget(_G, "string"), "char") ~= _char then return false end
+  return true
+end
+local __U = _U
+local __G = _G
+local function __pack(...) return {n = _sel('#', ...), ...} end
 local function __env(parent) return {v = {}, p = parent} end
 local function __get(e, k)
   while e do
@@ -360,18 +399,18 @@ end
 
 __evalMulti = function(e, env)
   local t = e[1]
-  if t == 'Call' then
+  if t == 26 then
     local f = __eval(e[2], env)
     local args = __evalList(e[3], env)
     return __pack(f(__U(args, 1, args.n)))
-  elseif t == 'Invoke' then
+  elseif t == 27 then
     local obj = __eval(e[2], env)
     local f = obj[e[3]]
     local args = __evalList(e[4], env)
     local all = {n = args.n + 1, obj}
     for k = 1, args.n do all[k + 1] = args[k] end
     return __pack(f(__U(all, 1, all.n)))
-  elseif t == 'Vararg' then
+  elseif t == 19 then
     return env.va or {n = 0}
   end
   return __pack(__eval(e, env))
@@ -393,20 +432,20 @@ end
 
 __eval = function(e, env)
   local t = e[1]
-  if t == 'Num' then return tonumber(e[2]) or 0
-  elseif t == 'Str' then return e[2]
-  elseif t == 'Nil' then return nil
-  elseif t == 'True' then return true
-  elseif t == 'False' then return false
-  elseif t == 'Vararg' then local v = env.va or {n=0} return v[1]
-  elseif t == 'Name' then return __get(env, e[2])
-  elseif t == 'Index' then
+  if t == 14 then return _tonum(e[2]) or 0
+  elseif t == 15 then return e[2]
+  elseif t == 16 then return nil
+  elseif t == 17 then return true
+  elseif t == 18 then return false
+  elseif t == 19 then local v = env.va or {n=0} return v[1]
+  elseif t == 20 then return __get(env, e[2])
+  elseif t == 21 then
     local o = __eval(e[2], env)
-    if o == nil then error('attempt to index a nil value', 0) end
+    if o == nil then _err('attempt to index a nil value', 0) end
     local k = e[3]
-    if k[1] == 'Str' then return o[k[2]] end
+    if k[1] == 15 then return o[k[2]] end
     return o[__eval(k, env)]
-  elseif t == 'Bin' then
+  elseif t == 22 then
     local op = e[2]
     if op == 'and' then local a = __eval(e[3], env) if not a then return a end return __eval(e[4], env) end
     if op == 'or' then local a = __eval(e[3], env) if a then return a end return __eval(e[4], env) end
@@ -426,16 +465,16 @@ __eval = function(e, env)
     elseif op == '<=' then return a <= b
     elseif op == '>=' then return a >= b
     end
-    error('bad op ' .. tostring(op), 0)
-  elseif t == 'Un' then
+    _err('bad op ' .. _tostr(op), 0)
+  elseif t == 23 then
     local op = e[2]
     local v = __eval(e[3], env)
     if op == '-' then return -v
     elseif op == 'not' then return not v
     elseif op == '#' then return #v
     end
-    error('bad unop ' .. tostring(op), 0)
-  elseif t == 'Table' then
+    _err('bad unop ' .. _tostr(op), 0)
+  elseif t == 24 then
     local items = e[2]
     local out = {}
     local n = 0
@@ -449,44 +488,46 @@ __eval = function(e, env)
       end
     end
     return out
-  elseif t == 'Func' then
+  elseif t == 25 then
     return __fn(e, env)
-  elseif t == 'Call' or t == 'Invoke' then
+  elseif t == 26 or t == 27 then
     local m = __evalMulti(e, env)
     return m[1]
   end
-  error('bad expr ' .. tostring(t), 0)
+  _err('bad expr ' .. _tostr(t), 0)
 end
 
 local function __assign(target, val, env)
-  if target[1] == 'Name' then
+  if target[1] == 20 then
     __set(env, target[2], val)
   else
     local o = __eval(target[2], env)
-    if o == nil then error('attempt to index a nil value', 0) end
+    if o == nil then _err('attempt to index a nil value', 0) end
     local k = target[3]
-    if k[1] == 'Str' then o[k[2]] = val else o[__eval(k, env)] = val end
+    if k[1] == 15 then o[k[2]] = val else o[__eval(k, env)] = val end
   end
 end
 
 __exec = function(stmts, env)
+  __tick = (__tick or 0) + 1
+  if __tick % 4000 == 0 and not _canary() then return nil end
   for si = 1, #stmts do
     local s = stmts[si]
     local t = s[1]
-    if t == 'Local' then
+    if t == 1 then
       local vals = __evalList(s[3], env)
       local names = s[2]
       for k = 1, #names do env.v[names[k]] = vals[k] end
-    elseif t == 'LocalFunc' then
+    elseif t == 2 then
       local name = s[2]
       env.v[name] = nil
       local fn = __fn(s[3], env)
       env.v[name] = fn
-    elseif t == 'Set' then
+    elseif t == 3 then
       local refs = {}
       for k = 1, #s[2] do
         local tg = s[2][k]
-        if tg[1] == 'Name' then
+        if tg[1] == 20 then
           refs[k] = {0, tg[2]}
         else
           refs[k] = {1, __eval(tg[2], env), tg[3]}
@@ -496,16 +537,16 @@ __exec = function(stmts, env)
       for k = 1, #s[2] do
         local tg, r = s[2][k], refs[k]
         local v = vals[k]
-        if tg[1] == 'Name' then
+        if tg[1] == 20 then
           __set(env, tg[2], v)
         else
           local o = r[2]
-          if o == nil then error('attempt to index a nil value', 0) end
+          if o == nil then _err('attempt to index a nil value', 0) end
           local key = r[3]
-          if key[1] == 'Str' then o[key[2]] = v else o[__eval(key, env)] = v end
+          if key[1] == 15 then o[key[2]] = v else o[__eval(key, env)] = v end
         end
       end
-    elseif t == 'FuncDecl' then
+    elseif t == 4 then
       local path = s[2]
       local fn = __fn(s[3], env)
       if #path == 1 then
@@ -515,9 +556,9 @@ __exec = function(stmts, env)
         for k = 2, #path - 1 do o = o[path[k]] end
         o[path[#path]] = fn
       end
-    elseif t == 'CallStat' then
+    elseif t == 5 then
       __evalMulti(s[2], env)
-    elseif t == 'If' then
+    elseif t == 6 then
       local sig
       if __eval(s[2], env) then
         sig = __exec(s[3], env)
@@ -532,7 +573,7 @@ __exec = function(stmts, env)
         if not sig and s[5] then sig = __exec(s[5], env) end
       end
       if sig then return sig end
-    elseif t == 'While' then
+    elseif t == 7 then
       while __eval(s[2], env) do
         local e2 = __env(env)
         local sig = __exec(s[3], e2)
@@ -541,7 +582,7 @@ __exec = function(stmts, env)
           return sig
         end
       end
-    elseif t == 'Repeat' then
+    elseif t == 8 then
       while true do
         local e2 = __env(env)
         local sig = __exec(s[2], e2)
@@ -551,11 +592,11 @@ __exec = function(stmts, env)
         end
         if __eval(s[3], e2) then break end
       end
-    elseif t == 'NumFor' then
-      local a = tonumber(__eval(s[3], env)) or 0
-      local b = tonumber(__eval(s[4], env)) or 0
-      local c = s[5] and (tonumber(__eval(s[5], env)) or 1) or 1
-      if c == 0 then error("'for' step is zero", 0) end
+    elseif t == 9 then
+      local a = _tonum(__eval(s[3], env)) or 0
+      local b = _tonum(__eval(s[4], env)) or 0
+      local c = s[5] and (_tonum(__eval(s[5], env)) or 1) or 1
+      if c == 0 then _err("'for' step is zero", 0) end
       local i = a
       while (c > 0 and i <= b) or (c < 0 and i >= b) do
         local e2 = __env(env)
@@ -567,7 +608,7 @@ __exec = function(stmts, env)
         end
         i = i + c
       end
-    elseif t == 'GenFor' then
+    elseif t == 10 then
       local vals = __evalList(s[3], env)
       local f, st, ctl = vals[1], vals[2], vals[3]
       while true do
@@ -583,12 +624,12 @@ __exec = function(stmts, env)
           return sig
         end
       end
-    elseif t == 'Do' then
+    elseif t == 11 then
       local sig = __exec(s[2], __env(env))
       if sig then return sig end
-    elseif t == 'Return' then
+    elseif t == 12 then
       return {t = 'return', v = __evalList(s[2], env)}
-    elseif t == 'Break' then
+    elseif t == 13 then
       return {t = 'break'}
     end
   end
@@ -596,11 +637,35 @@ __exec = function(stmts, env)
 end
 
 return function(ast)
+  if not _canary() then return end
+  if _getinfo then
+    local function _probe() return _getinfo(1, "S") end
+    local ok, info = _pcall(_probe)
+    if not ok or not info or info.what ~= "Lua" then return end
+  end
   local root = __env(nil)
   local sig = __exec(ast, root)
-  if sig and sig.t == 'return' then return __U(sig.v, 1, sig.v.n) end
+  if sig and sig.t == 'return' then
+    local res = __U(sig.v, 1, sig.v.n)
+    for k = 1, #ast do ast[k] = nil end
+    return res
+  end
 end
 `;
+
+
+const AST_TAG = {"Local": 1, "LocalFunc": 2, "Set": 3, "FuncDecl": 4, "CallStat": 5, "If": 6, "While": 7, "Repeat": 8, "NumFor": 9, "GenFor": 10, "Do": 11, "Return": 12, "Break": 13, "Num": 14, "Str": 15, "Nil": 16, "True": 17, "False": 18, "Vararg": 19, "Name": 20, "Index": 21, "Bin": 22, "Un": 23, "Table": 24, "Func": 25, "Call": 26, "Invoke": 27};
+
+function encodeAst(node) {
+  if (!Array.isArray(node)) return node;
+  if (typeof node[0] === 'string') {
+    const out = new Array(node.length);
+    out[0] = AST_TAG[node[0]];
+    for (let i = 1; i < node.length; i++) out[i] = encodeAst(node[i]);
+    return out;
+  }
+  return node.map(encodeAst);
+}
 
 function buildVM(ast, rid) {
   const nm = rid ? { A: rid(), F: rid() } : { A: 'AST', F: 'RUN' };
