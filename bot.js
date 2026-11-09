@@ -226,11 +226,15 @@ function isStaff(member) {
   return STAFF_ROLES.some(function (r) { return member.roles.cache.has(r); });
 }
 
-async function webPremium(username, plan) {
+async function webPremium(username, plan, staff) {
   const res = await fetch(WEB_URL + '/api/discord/premium', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
-    body: JSON.stringify({ username: username, plan: plan })
+    body: JSON.stringify({
+      username: username, plan: plan,
+      staffId: (staff && staff.id) || '',
+      staffName: (staff && staff.tag) || ''
+    })
   });
   const data = await res.json().catch(function () { return {}; });
   return { ok: res.ok, data: data };
@@ -552,7 +556,7 @@ client.on('interactionCreate', async function (interaction) {
       if (!st.username) return interaction.reply({ content: 'ยังไม่ได้กรอกชื่อบัญชี', flags: MessageFlags.Ephemeral });
       if (!st.plan) return interaction.reply({ content: 'ยังไม่ได้เลือกแพ็กเกจ', flags: MessageFlags.Ephemeral });
       await interaction.deferReply();
-      const r = await webPremium(st.username, st.plan);
+      const r = await webPremium(st.username, st.plan, interaction.user);
       if (!r.ok) {
         return interaction.editReply({ content: 'ให้พรีเมียมไม่สำเร็จ: ' + (r.data.error || 'unknown') });
       }
@@ -575,6 +579,21 @@ client.on('interactionCreate', async function (interaction) {
         content: EMOJI_PREMIUM + ' ให้พรีเมียม **' + st.username + '** แพ็กเกจ ' + (st.plan === '1y' ? '1 ปี' : '1 เดือน') +
           ' แล้ว\nหมดอายุ <t:' + untilTs + ':F>' + roleNote
       });
+      const logCh = await client.channels.fetch(VERIFY_LOG).catch(function () { return null; });
+      if (logCh) {
+        await logCh.send({
+          embeds: [new EmbedBuilder()
+            .setColor(0xf1c40f)
+            .setTitle(EMOJI_PREMIUM + ' ให้พรีเมียม')
+            .setDescription(
+              '**ผู้รับ:** `' + st.username + '`' + (r.data.discordId ? ' (<@' + r.data.discordId + '>)' : '') + '\n' +
+              '**แพ็กเกจ:** ' + (st.plan === '1y' ? '1 ปี' : '1 เดือน') + '\n' +
+              '**หมดอายุ:** <t:' + untilTs + ':F>\n' +
+              '**พนักงาน:** ' + interaction.user + ' (`' + interaction.user.tag + '`)'
+            )
+            .setTimestamp()]
+        }).catch(function () {});
+      }
       st.done = true;
       saveRoomState();
       return;
@@ -759,6 +778,24 @@ async function checkExpiredPremium() {
           body: JSON.stringify({ username: item.username })
         }).catch(function () {});
         console.log('⌛ ปลดพรีเมียม: ' + item.username);
+        const logCh = await client.channels.fetch(VERIFY_LOG).catch(function () { return null; });
+        if (logCh) {
+          const untilTs = Math.floor(Number(item.until || 0) / 1000);
+          const grantedTs = Math.floor(Number(item.grantedAt || 0) / 1000);
+          await logCh.send({
+            embeds: [new EmbedBuilder()
+              .setColor(0xe74c3c)
+              .setTitle('⌛ ปลดพรีเมียม (หมดอายุ)')
+              .setDescription(
+                '**ผู้ใช้:** `' + item.username + '`' + (item.discordId ? ' (<@' + item.discordId + '>)' : '') + '\n' +
+                '**แพ็กเกจเดิม:** ' + (item.plan === '1y' ? '1 ปี' : (item.plan === '1m' ? '1 เดือน' : '-')) + '\n' +
+                (untilTs ? '**หมดอายุเมื่อ:** <t:' + untilTs + ':F>\n' : '') +
+                '**ให้โดยพนักงาน:** ' + (item.grantedBy ? item.grantedBy : 'ไม่ทราบ') + '\n' +
+                (grantedTs ? '**ให้เมื่อ:** <t:' + grantedTs + ':F>' : '')
+              )
+              .setTimestamp()]
+          }).catch(function () {});
+        }
       } catch (e) {
         console.error('expire failed:', item.username, e.message);
       }
