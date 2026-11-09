@@ -322,6 +322,8 @@ function toLua(value) {
 const VM_RUNTIME = `
 local _G = (getfenv and getfenv()) or _ENV
 local _K = __KEY__
+local _M = {}
+for _i = 0, 31 do _M[_i] = (_i - _K) % 32 end
 local _U = table.unpack or unpack
 local _sel = select
 local _type = type
@@ -409,7 +411,7 @@ __fn = function(node, env)
 end
 
 __evalMulti = function(e, env)
-  local t = (e[1] - _K) % 32
+  local t = _M[e[1]]
   if t == 26 then
     local f = __eval(e[2], env)
     local args = __evalList(e[3], env)
@@ -442,7 +444,7 @@ __evalList = function(list, env)
 end
 
 __eval = function(e, env)
-  local t = (e[1] - _K) % 32
+  local t = _M[e[1]]
   if t == 14 then return _tonum(e[2]) or 0
   elseif t == 15 then return __str(e)
   elseif t == 16 then return nil
@@ -454,7 +456,7 @@ __eval = function(e, env)
     local o = __eval(e[2], env)
     if o == nil then _err('attempt to index a nil value', 0) end
     local k = e[3]
-    if (k[1] - _K) % 32 == 15 then return o[__str(k)] end
+    if _M[k[1]] == 15 then return o[__str(k)] end
     return o[__eval(k, env)]
   elseif t == 22 then
     local op = e[2]
@@ -509,13 +511,13 @@ __eval = function(e, env)
 end
 
 local function __assign(target, val, env)
-  if (target[1] - _K) % 32 == 20 then
+  if _M[target[1]] == 20 then
     __set(env, target[2], val)
   else
     local o = __eval(target[2], env)
     if o == nil then _err('attempt to index a nil value', 0) end
     local k = target[3]
-    if (k[1] - _K) % 32 == 15 then o[__str(k)] = val else o[__eval(k, env)] = val end
+    if _M[k[1]] == 15 then o[__str(k)] = val else o[__eval(k, env)] = val end
   end
 end
 
@@ -524,7 +526,7 @@ __exec = function(stmts, env)
   if __tick % 4000 == 0 and not _canary() then return nil end
   for si = 1, #stmts do
     local s = stmts[si]
-    local t = (s[1] - _K) % 32
+    local t = _M[s[1]]
     if t == 1 then
       local vals = __evalList(s[3], env)
       local names = s[2]
@@ -538,7 +540,7 @@ __exec = function(stmts, env)
       local refs = {}
       for k = 1, #s[2] do
         local tg = s[2][k]
-        if (tg[1] - _K) % 32 == 20 then
+        if _M[tg[1]] == 20 then
           refs[k] = {0, tg[2]}
         else
           refs[k] = {1, __eval(tg[2], env), tg[3]}
@@ -548,13 +550,13 @@ __exec = function(stmts, env)
       for k = 1, #s[2] do
         local tg, r = s[2][k], refs[k]
         local v = vals[k]
-        if (tg[1] - _K) % 32 == 20 then
+        if _M[tg[1]] == 20 then
           __set(env, tg[2], v)
         else
           local o = r[2]
           if o == nil then _err('attempt to index a nil value', 0) end
           local key = r[3]
-          if (key[1] - _K) % 32 == 15 then o[__str(key)] = v else o[__eval(key, env)] = v end
+          if _M[key[1]] == 15 then o[__str(key)] = v else o[__eval(key, env)] = v end
         end
       end
     elseif t == 4 then
@@ -678,6 +680,121 @@ function encodeAst(node) {
   return node.map(encodeAst);
 }
 
+
+function makeGen() {
+  let n = 0;
+  const A = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  return function () {
+    n++;
+    let s = '';
+    let v = n;
+    while (v > 0) { s = A[(v - 1) % 52] + s; v = Math.floor((v - 1) / 52); }
+    return s + '_' + (n % 97);
+  };
+}
+
+function renameAst(ast, rid) {
+  const scopes = [new Map()];
+  function declare(n) {
+    const g = rid();
+    scopes[scopes.length - 1].set(n, g);
+    return g;
+  }
+  function lookup(n) {
+    for (let i = scopes.length - 1; i >= 0; i--) {
+      if (scopes[i].has(n)) return scopes[i].get(n);
+    }
+    return null;
+  }
+  function ex(e) {
+    if (!Array.isArray(e)) return e;
+    const t = e[0];
+    if (t === T.Name) {
+      const g = lookup(e[1]);
+      return [T.Name, g === null ? e[1] : g];
+    }
+    if (t === T.Index) return [T.Index, ex(e[1]), ex(e[2])];
+    if (t === T.Bin) return [T.Bin, e[1], ex(e[2]), ex(e[3])];
+    if (t === T.Un) return [T.Un, e[1], ex(e[2])];
+    if (t === T.Call) return [T.Call, ex(e[1]), e[2].map(ex)];
+    if (t === T.Invoke) return [T.Invoke, ex(e[1]), e[2], e[3].map(ex)];
+    if (t === T.Table) return [T.Table, e[1].map(function (p) { return [p[0] ? ex(p[0]) : null, ex(p[1])]; })];
+    if (t === T.Func) {
+      scopes.push(new Map());
+      const params = e[1].map(declare);
+      const body = blk(e[3]);
+      scopes.pop();
+      return [T.Func, params, e[2], body];
+    }
+    if (t === T.Str || t === T.Num || t === T.Nil || t === T.True || t === T.False || t === T.Vararg) return e;
+    return e.map(function (x, i) { return i === 0 ? x : (Array.isArray(x) ? ex(x) : x); });
+  }
+  function blk(stmts) {
+    scopes.push(new Map());
+    const out = [];
+    for (const s of stmts) {
+      const t = s[0];
+      if (t === T.Local) {
+        const vals = s[2].map(ex);
+        const names = s[1].map(declare);
+        out.push([T.Local, names, vals]);
+      } else if (t === T.LocalFunc) {
+        const g = declare(s[1]);
+        out.push([T.LocalFunc, g, ex(s[2])]);
+      } else if (t === T.Set) {
+        const targets = s[1].map(function (tg) {
+          if (tg[0] === T.Name) { const g = lookup(tg[1]); return [T.Name, g === null ? tg[1] : g]; }
+          return ex(tg);
+        });
+        out.push([T.Set, targets, s[2].map(ex)]);
+      } else if (t === T.FuncDecl) {
+        const path = s[1].slice();
+        const g = lookup(path[0]);
+        if (g !== null) path[0] = g;
+        out.push([T.FuncDecl, path, ex(s[2])]);
+      } else if (t === T.CallStat) {
+        out.push([T.CallStat, ex(s[1])]);
+      } else if (t === T.If) {
+        const elses = s[3].map(function (p) { return [ex(p[0]), blk(p[1])]; });
+        out.push([T.If, ex(s[1]), blk(s[2]), elses, s[4] ? blk(s[4]) : null]);
+      } else if (t === T.While) {
+        out.push([T.While, ex(s[1]), blk(s[2])]);
+      } else if (t === T.Repeat) {
+        scopes.push(new Map());
+        const body = blk(s[1]);
+        const cond = ex(s[2]);
+        scopes.pop();
+        out.push([T.Repeat, body, cond]);
+      } else if (t === T.NumFor) {
+        const a = ex(s[2]), b = ex(s[3]), c = s[4] ? ex(s[4]) : null;
+        scopes.push(new Map());
+        const g = declare(s[1]);
+        const body = blk(s[4 + 1]);
+        scopes.pop();
+        out.push([T.NumFor, g, a, b, c, body]);
+      } else if (t === T.GenFor) {
+        const exprs = s[2].map(ex);
+        scopes.push(new Map());
+        const names = s[1].map(declare);
+        const body = blk(s[3]);
+        scopes.pop();
+        out.push([T.GenFor, names, exprs, body]);
+      } else if (t === T.Do) {
+        out.push([T.Do, blk(s[1])]);
+      } else if (t === T.Return) {
+        out.push([T.Return, s[1].map(ex)]);
+      } else if (t === T.Break) {
+        out.push([T.Break]);
+      } else {
+        out.push(s);
+      }
+    }
+    scopes.pop();
+    return out;
+  }
+  return blk(ast);
+}
+
 function encodeNode(node, K, rnd) {
   if (!Array.isArray(node)) return node;
   if (typeof node[0] === 'number' && node[0] >= 1 && node[0] <= 27) {
@@ -701,7 +818,8 @@ function buildVM(ast, rid, rnd) {
   const nm = rid ? { A: rid(), F: rid() } : { A: 'AST', F: 'RUN' };
   const rf = rnd || Math.random;
   const K = 1 + Math.floor(rf() * 30);
-  const body = encodeNode(ast, K, rf);
+  const renamed = (process.env.VM_RENAME === '0') ? ast : renameAst(ast, rid || makeGen());
+  const body = encodeNode(renamed, K, rf);
   const runtime = VM_RUNTIME.replace('__KEY__', String(K));
   const parts = [];
   parts.push('local ' + nm.A + '=' + toLua(body));
