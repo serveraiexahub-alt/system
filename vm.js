@@ -321,6 +321,7 @@ function toLua(value) {
 
 const VM_RUNTIME = `
 local _G = (getfenv and getfenv()) or _ENV
+local _K = __KEY__
 local _U = table.unpack or unpack
 local _sel = select
 local _type = type
@@ -361,6 +362,16 @@ end
 local __U = _U
 local __G = _G
 local function __pack(...) return {n = _sel('#', ...), ...} end
+local function __str(n)
+  local c = n[4]
+  if c then return c end
+  local b, k = n[3], n[2]
+  local o = {}
+  for i = 1, #b do o[i] = _char((b[i] + k) % 256) end
+  local s = _concat(o)
+  n[4] = s
+  return s
+end
 local function __env(parent) return {v = {}, p = parent} end
 local function __get(e, k)
   while e do
@@ -398,7 +409,7 @@ __fn = function(node, env)
 end
 
 __evalMulti = function(e, env)
-  local t = e[1]
+  local t = (e[1] - _K) % 32
   if t == 26 then
     local f = __eval(e[2], env)
     local args = __evalList(e[3], env)
@@ -431,9 +442,9 @@ __evalList = function(list, env)
 end
 
 __eval = function(e, env)
-  local t = e[1]
+  local t = (e[1] - _K) % 32
   if t == 14 then return _tonum(e[2]) or 0
-  elseif t == 15 then return e[2]
+  elseif t == 15 then return __str(e)
   elseif t == 16 then return nil
   elseif t == 17 then return true
   elseif t == 18 then return false
@@ -443,7 +454,7 @@ __eval = function(e, env)
     local o = __eval(e[2], env)
     if o == nil then _err('attempt to index a nil value', 0) end
     local k = e[3]
-    if k[1] == 15 then return o[k[2]] end
+    if (k[1] - _K) % 32 == 15 then return o[__str(k)] end
     return o[__eval(k, env)]
   elseif t == 22 then
     local op = e[2]
@@ -498,13 +509,13 @@ __eval = function(e, env)
 end
 
 local function __assign(target, val, env)
-  if target[1] == 20 then
+  if (target[1] - _K) % 32 == 20 then
     __set(env, target[2], val)
   else
     local o = __eval(target[2], env)
     if o == nil then _err('attempt to index a nil value', 0) end
     local k = target[3]
-    if k[1] == 15 then o[k[2]] = val else o[__eval(k, env)] = val end
+    if (k[1] - _K) % 32 == 15 then o[__str(k)] = val else o[__eval(k, env)] = val end
   end
 end
 
@@ -513,7 +524,7 @@ __exec = function(stmts, env)
   if __tick % 4000 == 0 and not _canary() then return nil end
   for si = 1, #stmts do
     local s = stmts[si]
-    local t = s[1]
+    local t = (s[1] - _K) % 32
     if t == 1 then
       local vals = __evalList(s[3], env)
       local names = s[2]
@@ -527,7 +538,7 @@ __exec = function(stmts, env)
       local refs = {}
       for k = 1, #s[2] do
         local tg = s[2][k]
-        if tg[1] == 20 then
+        if (tg[1] - _K) % 32 == 20 then
           refs[k] = {0, tg[2]}
         else
           refs[k] = {1, __eval(tg[2], env), tg[3]}
@@ -537,13 +548,13 @@ __exec = function(stmts, env)
       for k = 1, #s[2] do
         local tg, r = s[2][k], refs[k]
         local v = vals[k]
-        if tg[1] == 20 then
+        if (tg[1] - _K) % 32 == 20 then
           __set(env, tg[2], v)
         else
           local o = r[2]
           if o == nil then _err('attempt to index a nil value', 0) end
           local key = r[3]
-          if key[1] == 15 then o[key[2]] = v else o[__eval(key, env)] = v end
+          if (key[1] - _K) % 32 == 15 then o[__str(key)] = v else o[__eval(key, env)] = v end
         end
       end
     elseif t == 4 then
@@ -667,11 +678,34 @@ function encodeAst(node) {
   return node.map(encodeAst);
 }
 
-function buildVM(ast, rid) {
+function encodeNode(node, K, rnd) {
+  if (!Array.isArray(node)) return node;
+  if (typeof node[0] === 'number' && node[0] >= 1 && node[0] <= 27) {
+    const tag = node[0];
+    if (tag === 15) {
+      const buf = Buffer.from(String(node[1]), 'utf8');
+      const kk = 1 + Math.floor(rnd() * 250);
+      const bytes = [];
+      for (let i = 0; i < buf.length; i++) bytes.push(((buf[i] - kk) % 256 + 256) % 256);
+      return [(tag + K) % 32, kk, bytes];
+    }
+    const out = new Array(node.length);
+    out[0] = (tag + K) % 32;
+    for (let i = 1; i < node.length; i++) out[i] = encodeNode(node[i], K, rnd);
+    return out;
+  }
+  return node.map(function (x) { return encodeNode(x, K, rnd); });
+}
+
+function buildVM(ast, rid, rnd) {
   const nm = rid ? { A: rid(), F: rid() } : { A: 'AST', F: 'RUN' };
+  const rf = rnd || Math.random;
+  const K = 1 + Math.floor(rf() * 30);
+  const body = encodeNode(ast, K, rf);
+  const runtime = VM_RUNTIME.replace('__KEY__', String(K));
   const parts = [];
-  parts.push('local ' + nm.A + '=' + toLua(ast));
-  parts.push('local ' + nm.F + '=(function()' + VM_RUNTIME + 'end)()');
+  parts.push('local ' + nm.A + '=' + toLua(body));
+  parts.push('local ' + nm.F + '=(function()' + runtime + 'end)()');
   parts.push('return ' + nm.F + '(' + nm.A + ')');
   return parts.join(' ');
 }
