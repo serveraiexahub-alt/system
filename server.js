@@ -1782,9 +1782,8 @@ const HTML = `<!doctype html>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 :root { --bg:#000; --bg2:#0a0a0a; --panel:#0d0d0d; --line:#1c1c1c; --line2:#2a2a2a; --fg:#f5f5f5; --muted:#8a8a8a; }
 html, body { height: 100%; }
-body { background: var(--bg); color: var(--fg); font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
-  background-image: url('https://i.ibb.co/mVfk18DZ/Messenger-creation-3-EEB72-A5-F43-E-4-BEC-9-AD2-F2-CF1-C824-EAA.gif'); background-size: cover; background-position: center; background-attachment: fixed; background-repeat: no-repeat; }
-body::before { content: ''; position: fixed; inset: 0; background: rgba(0,0,0,.82); z-index: -1; pointer-events: none; } }
+body { background: var(--bg); color: var(--fg); font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; background-image: url('https://i.ibb.co/mVfk18DZ/Messenger-creation-3-EEB72-A5-F43-E-4-BEC-9-AD2-F2-CF1-C824-EAA.gif'); background-size: cover; background-position: center; background-attachment: fixed; background-repeat: no-repeat; }
+body::before { content: ''; position: fixed; inset: 0; background: rgba(0,0,0,.86); z-index: -1; pointer-events: none; }
 .i { width: 18px; height: 18px; flex: 0 0 auto; }
 a { color: var(--fg); text-decoration: none; }
 button { font-family: inherit; cursor: pointer; }
@@ -2082,7 +2081,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     var d = Math.floor(h / 24); if (d < 30) return d + ' ' + t('ago_day');
     return fmt(ts);
   }
-  var state = { user: null, files: [], invites: [], folders: [], fav: { files: [], folders: [] }, search: null, q: '', timer: null, following: [], tab: 'files', fp: '' };
+  var state = { user: null, files: [], invites: [], folders: [], fav: { files: [], folders: [] }, search: null, q: '', timer: null, following: [], tab: 'folders', fp: '' };
   function makeFp() {
     try {
       var k = 'fp';
@@ -2291,7 +2290,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   }
   function renderNav() {
     var nav = document.getElementById('nav'); if (!nav) return;
-    var items = [['files', ICON.file, t('nav_files')], ['folders', ICON.folder, t('nav_folders')]];
+    var items = [['folders', ICON.folder, t('nav_folders')]];
     nav.innerHTML = items.map(function (it) {
       return '<button data-tab="' + it[0] + '" class="' + (state.tab === it[0] && !state.q ? 'on' : '') + '">' + it[1] + ' ' + it[2] + '</button>';
     }).join('');
@@ -2306,8 +2305,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   function renderView() {
     var v = document.getElementById('view'); if (!v) return;
     if (state.q) return renderSearch();
-    if (state.tab === 'folders') return renderFolders();
-    return renderFiles();
+    return renderFolders();
   }
   function picker(id, opts, cur, ph) {
     var c = null;
