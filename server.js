@@ -2898,17 +2898,24 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       orb.style.top = ny + 'px';
       e.preventDefault();
     }
+    var lastToggle = 0;
+    function toggleAi() {
+      var now = Date.now();
+      if (now - lastToggle < 400) return;
+      lastToggle = now;
+      openAi();
+    }
     function endDrag() {
       if (!drag) return;
       var moved = drag.moved;
       drag = null;
       try { localStorage.setItem('aiOrbPos', JSON.stringify({ x: orb.offsetLeft, y: orb.offsetTop })); } catch (e) {}
-      if (false) openAi();
+      if (!moved) toggleAi();
     }
     orb.addEventListener('click', function (e) {
-      if (drag && drag.moved) return;
       e.preventDefault();
-      openAi();
+      if (drag && drag.moved) return;
+      toggleAi();
     });
     orb.addEventListener('mousedown', startDrag);
     document.addEventListener('mousemove', moveDrag);
@@ -2934,6 +2941,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<textarea class="aiinput" id="aiinput" rows="2" placeholder="' + t('ai_ph') + '"></textarea>' +
       '<button class="btn small" id="aisend">' + t('ai_send') + '</button></div>' +
       '<div class="aifoot" id="aifoot"></div>';
+    panel.style.zIndex = '9999';
     document.body.appendChild(panel);
     var body = panel.querySelector('#aibody');
     panel.querySelector('#aiclose').onclick = function () { panel.remove(); };
