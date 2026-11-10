@@ -49,6 +49,9 @@ const STAFF_ROLES = String(process.env.STAFF_ROLES || '1568617536038248579,15656
   .split(',').map(function (x) { return x.trim(); }).filter(Boolean);
 const PREMIUM_STATE = path.join(__dirname, 'premium-state.json');
 const PREMIUM_ROLE_ID = process.env.PREMIUM_ROLE_ID || '1569204641298915358';
+const PAY_TRUEMONEY_IMG = path.join(__dirname, 'assets', 'qr-truemoney.jpg');
+const PAY_BANK_IMG = path.join(__dirname, 'assets', 'qr-bank.jpg');
+const CALL_COOLDOWN = 30 * 1000;
 const EMOJI_VERIFY = process.env.EMOJI_VERIFY || '<:emoji_22:1569203851104493682>';
 const EMOJI_PREMIUM = process.env.EMOJI_PREMIUM || '<:emoji_19:1569202032009551912>';
 const EMOJI_LV = process.env.EMOJI_LV || '<:emoji_18:1569201995204530276>';
@@ -266,7 +269,7 @@ function roomPayload(channelId) {
       '**ชื่อบัญชีเว็บ:** ' + (st.username ? '`' + st.username + '`' : 'ยังไม่ได้กรอก') + '\n' +
       '**แพ็กเกจ:** ' + (st.plan === '1y' ? (EMOJI_1Y + ' 1 ปี · ' + PRICE_1Y + ' บาท') : (st.plan === '1m' ? (EMOJI_1M + ' 1 เดือน · ' + PRICE_1M + ' บาท') : 'ยังไม่ได้เลือก')) + '\n\n' +
       '**ราคา**\n' + EMOJI_1M + ' 1 เดือน — ' + PRICE_1M + ' บาท\n' + EMOJI_1Y + ' 1 ปี — ' + PRICE_1Y + ' บาท\n\n' +
-      'ขั้นตอน: กรอกชื่อบัญชีเว็บ → พนักงานเลือกแพ็กเกจ → พนักงานกด **ยืนยันให้พรีเมียม**'
+      'ขั้นตอน: กรอกชื่อบัญชีเว็บ → เลือกช่องทางจ่ายเงิน → พนักงานเลือกแพ็กเกจ → พนักงานกด **ยืนยันให้พรีเมียม**'
     )
     .setFooter({ text: 'ปิดห้องได้เมื่อให้พรีเมียมเสร็จ' });
   const b1 = new ButtonBuilder().setCustomId('prem_user').setLabel('กรอกชื่อบัญชี').setEmoji('👤').setStyle(ButtonStyle.Primary);
@@ -279,7 +282,12 @@ function roomPayload(channelId) {
     new ButtonBuilder().setCustomId('prem_apply').setLabel('ยืนยันให้พรีเมียม').setEmoji('✅').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('prem_close').setLabel('ปิดห้อง').setEmoji('🔒').setStyle(ButtonStyle.Danger)
   );
-  return { embeds: [embed], components: [row1, row2] };
+  const row3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('prem_pay_tm').setLabel('จ่ายผ่าน TrueMoney').setEmoji('📱').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('prem_pay_bank').setLabel('จ่ายผ่านธนาคาร').setEmoji('🏦').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('prem_call').setLabel('เรียกพนักงาน').setEmoji('🔔').setStyle(ButtonStyle.Secondary)
+  );
+  return { embeds: [embed], components: [row1, row2, row3] };
 }
 
 async function ensurePremiumPanel() {
@@ -710,6 +718,44 @@ client.on('interactionCreate', async function (interaction) {
       }
       st.done = true;
       saveRoomState();
+      return;
+    }
+
+    if (interaction.isButton() && (interaction.customId === 'prem_pay_tm' || interaction.customId === 'prem_pay_bank')) {
+      const isTm = interaction.customId === 'prem_pay_tm';
+      let file = null;
+      try {
+        const p = isTm ? PAY_TRUEMONEY_IMG : PAY_BANK_IMG;
+        if (fs.existsSync(p)) file = new AttachmentBuilder(fs.readFileSync(p), { name: isTm ? 'truemoney-qr.jpg' : 'bank-qr.jpg' });
+      } catch (e) {}
+      const embed = new EmbedBuilder()
+        .setColor(0x2ecc71)
+        .setTitle(isTm ? '📱 จ่ายผ่าน TrueMoney' : '🏦 จ่ายผ่านธนาคาร')
+        .setDescription(
+          'สแกน QR ด้านล่างเพื่อชำระเงิน\n' +
+          '• 1 เดือน — **' + PRICE_1M + ' บาท**\n' +
+          '• 1 ปี — **' + PRICE_1Y + ' บาท**\n\n' +
+          'โอนเสร็จแล้วส่งสลิปในห้องนี้ แล้วแจ้งพนักงาน'
+        );
+      if (file) embed.setImage('attachment://' + (isTm ? 'truemoney-qr.jpg' : 'bank-qr.jpg'));
+      const payload = { embeds: [embed] };
+      if (file) payload.files = [file];
+      return interaction.reply(payload);
+    }
+
+    if (interaction.isButton() && interaction.customId === 'prem_call') {
+      const st = roomState[interaction.channelId];
+      if (!st) return interaction.reply({ content: 'ไม่พบข้อมูลห้องนี้', flags: MessageFlags.Ephemeral });
+      const now = Date.now();
+      const last = st.lastCall || 0;
+      if (now - last < CALL_COOLDOWN) {
+        const wait = Math.ceil((CALL_COOLDOWN - (now - last)) / 1000);
+        return interaction.reply({ content: 'เรียกพนักงานไปแล้ว รออีก ' + wait + ' วินาที', flags: MessageFlags.Ephemeral });
+      }
+      st.lastCall = now;
+      saveRoomState();
+      const ping = STAFF_ROLES.map(function (r) { return '<@&' + r + '>'; }).join(' ');
+      await interaction.reply({ content: '🔔 ' + ping + ' — มีลูกค้าเรียกที่ห้องนี้ (' + interaction.user + ')' });
       return;
     }
 

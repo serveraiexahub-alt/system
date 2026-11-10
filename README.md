@@ -236,3 +236,33 @@ POST /api/discord/premium/cleared    -> ยืนยันว่าถอดย�
 | dead code template เดียว | repack ได้ | ยังเป็นเทมเพลต (ยอมรับ) |
 
 ยังเหลือ: memory dump, การ emulate VM (เขาสร้าง Roblox emulator เองได้)
+
+## ความปลอดภัยของเว็บ (ตรวจแล้ว)
+
+| หัวข้อ | สถานะ |
+|---|---|
+| แฮชรหัสผ่าน | scrypt + salt (ไม่เก็บ plaintext) |
+| จำกัดการลองผิด | 10 ครั้ง / 15 นาที ต่อบัญชี+IP |
+| แจ้งเตือนล็อกอิน IP ใหม่ | ส่งเข้า `SIGNUP_NOTIFY_CHANNEL` |
+| SQL injection | ไม่มี SQL (JSON DB) + `ownGet` กัน prototype pollution |
+| XSS | escape ทุกจุดที่แสดงข้อมูลผู้ใช้ |
+| Cookie | HttpOnly, SameSite=Lax, +Secure เมื่อ https |
+| Session | HMAC-signed, หมดอายุ 30 วัน, logout ล้าง |
+| HTTPS | HSTS + `FORCE_HTTPS=1` เพื่อ redirect |
+| Security headers | CSP, nosniff, DENY, Referrer-Policy, Permissions-Policy |
+| Rate limit | ต่อ IP ทุก endpoint + login แยก |
+| สิทธิ์ทุก endpoint | ตรวจเจ้าของ/ผู้มีสิทธิ์ (ทดสอบ IDOR แล้ว) |
+| อัปโหลด | จำกัดขนาด + ตรวจ magic bytes + กัน SVG |
+| Error | handler กลาง ไม่คาย stack trace |
+| npm audit | 0 vulnerabilities |
+
+## Anti-bot สมัครบัญชี
+
+1. **Captcha รูป** — 4 หลัก บิดเบือน
+2. **Honeypot** — ช่อง `website` ซ่อนด้วย CSS ถ้าบอทกรอก = ปฏิเสธ
+3. **Cloudflare Turnstile** — เปิดด้วย `TURNSTILE_SITE_KEY` + `TURNSTILE_SECRET`
+
+## การชำระเงินในห้องพรีเมียม
+
+ปุ่ม **จ่ายผ่าน TrueMoney** / **จ่ายผ่านธนาคาร** จะส่งรูป QR ให้ลูกค้าสแกน
+และปุ่ม **เรียกพนักงาน** แท็กยศพนักงานพร้อมคูลดาวน์ 30 วินาที

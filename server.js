@@ -107,7 +107,11 @@ app.use(function (req, res, next) {
   res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
   res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
-  if (String(req.headers['x-forwarded-proto'] || req.protocol) === 'https') res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol);
+  if (proto === 'https') res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  else if (process.env.FORCE_HTTPS === '1' && req.path.indexOf('/api/') !== 0) {
+    return res.redirect(301, 'https://' + String(req.headers.host || '') + req.originalUrl);
+  }
   if (req.path.indexOf('/api/') === 0) {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     res.setHeader('Pragma', 'no-cache');
@@ -249,7 +253,9 @@ function auth(req, res, next) {
 
 function setSession(res, uid) {
   const token = sign({ uid: uid, exp: Date.now() + SESSION_DAYS * 86400000 });
-  res.setHeader('Set-Cookie', 'token=' + token + '; HttpOnly; SameSite=Lax; Path=/; Max-Age=' + (SESSION_DAYS * 86400));
+  const secure = res.req && String(res.req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+  res.setHeader('Set-Cookie', 'token=' + token + '; HttpOnly; SameSite=Lax; Path=/' +
+    (secure ? '; Secure' : '') + '; Max-Age=' + (SESSION_DAYS * 86400));
 }
 
 const hits = {};
@@ -483,7 +489,7 @@ const DISCORD_INVITE = String(process.env.DISCORD_INVITE || 'https://discord.gg/
 const BOT_SECRET = String(process.env.BOT_SECRET || '');
 const REQUIRE_DISCORD = BOT_SECRET.length > 0;
 
-app.post('/api/signup/begin', limiter, function (req, res) {
+app.post('/api/signup/begin', limiter, async function (req, res) {
   const body = req.body || {};
   const username = String(body.username || '').trim().toLowerCase();
   const password = String(body.password || '');
@@ -493,6 +499,13 @@ app.post('/api/signup/begin', limiter, function (req, res) {
   if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'Username must be 3-20 characters (a-z, 0-9, _)' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
   for (const u of Object.values(db.users)) if (u.username === username) return res.status(409).json({ error: 'Username already taken' });
+
+  const honey = String(body.website || body.hp || '').trim();
+  if (honey) return res.status(400).json({ error: 'Request rejected' });
+  if (TURNSTILE_ON) {
+    const okT = await verifyTurnstile(body.turnstile, realIp(req));
+    if (!okT) return res.status(400).json({ error: 'ยืนยันว่าไม่ใช่บอทไม่สำเร็จ ลองใหม่' });
+  }
 
   const cap = captchaStore.get(captchaId);
   if (!cap || cap.exp < Date.now()) return res.status(400).json({ error: 'Captcha expired, reload it' });
@@ -829,6 +842,18 @@ app.post('/api/login', limiter, function (req, res) {
     return res.status(401).json({ error: 'Invalid username or password' });
   }
   loginFails.delete(lkey);
+  const ipNow = realIp(req);
+  if (found.lastIp && found.lastIp !== ipNow) {
+    discordSend(SIGNUP_NOTIFY_CHANNEL, {
+      embeds: [{
+        title: '🔐 เข้าสู่ระบบจากอุปกรณ์/IP ใหม่',
+        color: 0xf1c40f,
+        description: 'บัญชี: **' + found.username + '**\nIP ใหม่: `' + ipNow + '`\nIP เดิม: `' + found.lastIp + '`\nเวลา: <t:' + Math.floor(Date.now() / 1000) + ':F>'
+      }]
+    }).catch(function () {});
+  }
+  found.lastIp = ipNow;
+  save();
   setSession(res, found.id);
   res.json({ ok: true, user: { id: found.id, username: found.username, nick: found.nick || '', avatar: found.avatar || '' } });
 });
@@ -1479,6 +1504,30 @@ app.get('/raw/:id', function (req, res) {
 
 const PREMIUM_INVITE = String(process.env.PREMIUM_INVITE_URL || 'https://discord.gg/VwzEtWtd6B');
 const UPDATE_NOTIFY_CHANNEL = String(process.env.UPDATE_NOTIFY_CHANNEL || '1569655232923832330');
+const UPDATE_IMAGE_URL = String(process.env.UPDATE_IMAGE_URL || 'https://raw.githubusercontent.com/serveraiexahub-alt/system/main/assets/update.jpg');
+const TURNSTILE_SITE = String(process.env.TURNSTILE_SITE_KEY || '');
+const TURNSTILE_SECRET = String(process.env.TURNSTILE_SECRET || '');
+const TURNSTILE_ON = TURNSTILE_SITE.length > 0 && TURNSTILE_SECRET.length > 0;
+
+async function verifyTurnstile(token, ip) {
+  if (!TURNSTILE_ON) return true;
+  if (!token) return false;
+  try {
+    const body = new URLSearchParams();
+    body.append('secret', TURNSTILE_SECRET);
+    body.append('response', String(token));
+    if (ip) body.append('remoteip', ip);
+    const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    });
+    const d = await r.json().catch(function () { return {}; });
+    return d && d.success === true;
+  } catch (e) {
+    return false;
+  }
+}
 const PRICE_1M = Number(process.env.PRICE_1M) || 25;
 const PRICE_1Y = Number(process.env.PRICE_1Y) || 220;
 
@@ -1491,12 +1540,13 @@ async function notifyUpdateIfNeeded() {
   if (!ver) return;
   if (db.lastNotifiedVersion === ver) return;
   const top = CHANGELOG[0];
+  const items = (top.items || []).map(function (x) { return '• ' + x; }).join('\n');
   const ok = await discordSend(UPDATE_NOTIFY_CHANNEL, {
     embeds: [{
       title: '🚀 อัปเดตเว็บ v' + String(ver).replace(/^v/, ''),
       color: 0x2ecc71,
-      description: (top.items || []).map(function (x) { return '• ' + x; }).join('\n') +
-        '\n\n_' + top.date + '_',
+      description: items + '\n\n_' + top.date + '_',
+      image: { url: UPDATE_IMAGE_URL },
       footer: { text: 'สกัด HUB' },
       timestamp: new Date().toISOString()
     }]
@@ -1513,7 +1563,8 @@ function renderPage() {
     .replace('__CHANGELOG_JSON__', JSON.stringify(CHANGELOG))
     .replace('__PREMIUM_INVITE__', PREMIUM_INVITE)
     .replace('__PRICE_1M__', String(PRICE_1M))
-    .replace('__PRICE_1Y__', String(PRICE_1Y));
+    .replace('__PRICE_1Y__', String(PRICE_1Y))
+    .replace('__TURNSTILE_SITE__', TURNSTILE_SITE);
 }
 
 app.get('/', function (req, res) {
@@ -1722,11 +1773,15 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 .obfopts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .obfopts .chk { margin: 0; padding: 8px 10px; font-size: 11px; }
 .monoarea { min-height: 140px; }
+.hpwrap { position: absolute; left: -9999px; top: -9999px; width: 1px; height: 1px; overflow: hidden; }
 .capbox { display: flex; align-items: center; gap: 10px; }
 .capbox img { height: 64px; width: 190px; border-radius: 8px; border: 1px solid var(--line2); background: #f4f4f4; }
 .verifycode { font-family: ui-monospace, monospace; font-size: 22px; font-weight: 800; letter-spacing: 2px; background: var(--bg2); border: 1px dashed var(--line2); border-radius: 10px; padding: 16px; text-align: center; margin: 10px 0 12px; word-break: break-all; }
 .accrow { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; background: var(--bg2); border: 1px solid var(--line2); border-radius: 8px; margin-top: 8px; font-size: 13px; }
 .acclab { color: var(--muted); }
+.perklist { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 4px; }
+.perkrow { display: flex; align-items: center; gap: 9px; font-size: 12.5px; line-height: 1.2; }
+.perkrow svg { width: 15px; height: 15px; flex: 0 0 auto; color: var(--fg); }
 .planbox { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border: 1px solid var(--line2); border-radius: 10px; background: var(--bg2); margin-bottom: 8px; }
 .planhead { font-size: 13px; font-weight: 700; }
 .planprice { font-size: 15px; font-weight: 800; color: var(--fg); }
@@ -1850,15 +1905,33 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<div class="err" id="err"></div>' +
       '<div class="field"><label>' + ICON.user + ' ' + t('username') + '</label><input class="input" id="username" autocomplete="username" spellcheck="false"></div>' +
       '<div class="field"><label>' + ICON.lock + ' ' + t('password') + '</label><input class="input" id="password" type="password" autocomplete="' + (signup ? 'new-password' : 'current-password') + '"></div>' +
-      (signup ? '<div class="field"><label>' + ICON.shield + ' ' + t('captcha') + '</label>' +
+      (signup ? '<div class="hpwrap"><label>Website</label><input class="input" id="hpfield" name="website" tabindex="-1" autocomplete="off"></div>' +
+        '<div class="field"><label>' + ICON.shield + ' ' + t('captcha') + '</label>' +
         '<div class="capbox"><img id="capimg" alt="" src=""><button class="iconbtn" id="capreload" title="reload">' + ICON.refresh + '</button></div>' +
         '<input class="input" id="capanswer" placeholder="' + t('captcha_ph') + '" inputmode="numeric" maxlength="4" style="margin-top:8px" spellcheck="false">' +
-        '<div class="hint">' + t('captcha_hint') + '</div></div>' : '') +
+        '<div class="hint">' + t('captcha_hint') + '</div></div>' +
+        '<div id="tsbox" style="margin:10px 0"></div>' : '') +
       '<button class="btn" id="go">' + t(signup ? 'signup' : 'login') + '</button>' +
       '<div class="switch">' + (signup ? t('have_account') + ' <a href="#" id="sw">' + t('login') + '</a>' : t('no_account') + ' <a href="#" id="sw">' + t('signup') + '</a>') + '</div></div></div>';
 
     var capId = '';
-    if (signup) loadCaptcha();
+    if (signup) {
+      loadCaptcha();
+      if (TURNSTILE_SITE) {
+        if (!window.turnstile) {
+          var sc = document.createElement('script');
+          sc.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+          sc.async = true; sc.defer = true;
+          document.head.appendChild(sc);
+        }
+        var tries = 0;
+        (function mountTs() {
+          if (window.turnstile) {
+            try { window.turnstile.render('#tsbox', { sitekey: TURNSTILE_SITE }); } catch (e) {}
+          } else if (tries++ < 40) setTimeout(mountTs, 250);
+        })();
+      }
+    }
 
     document.getElementById('sw').onclick = function (e) { e.preventDefault(); renderAuth(signup ? 'login' : 'signup'); };
     document.getElementById('go').onclick = submitAuth;
@@ -1894,7 +1967,10 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       state.lastPw = p;
       var cap = document.getElementById('capanswer').value.trim();
       if (!cap) { err.textContent = t('captcha_ph'); err.style.display = 'block'; return; }
-      fetch('/api/signup/begin', { method: 'POST', headers: hdrs, body: JSON.stringify({ username: u, password: p, captchaId: capId, captcha: cap }) })
+      var tsToken = '';
+      try { tsToken = (window.turnstile && window.turnstile.getResponse && window.turnstile.getResponse()) || ''; } catch (e) {}
+      var hpVal = (document.getElementById('hpfield') || {}).value || '';
+      fetch('/api/signup/begin', { method: 'POST', headers: hdrs, body: JSON.stringify({ username: u, password: p, captchaId: capId, captcha: cap, turnstile: tsToken, website: hpVal }) })
         .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) throw new Error(d.error || 'Request failed'); return d; }); })
         .then(function (d) { showVerify(d); })
         .catch(function (e) {
@@ -1990,7 +2066,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   function renderApp() {
     var me = state.user;
     app.innerHTML = '<header>' + brand() + '<div class="right">' +
-      '<div class="who">' + avat(me) + '<span>' + esc(me.nick || me.username) + '</span>' + (me.premium ? ICON.crown : '') + '</div>' +
+      '<div class="who">' + avat(me) + '<span>' + esc(me.nick || me.username) + '</span></div>' +
       '<button class="iconbtn" id="menu" title="' + t('account') + '">' + ICON.menu + '<span class="menubadge" id="menubadge"></span></button>' +
       '</div></header>' +
       '<main><div class="searchtop">' + '<span class="sic">' + ICON.search + '</span>' +
@@ -2512,7 +2588,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
         overlay.remove();
         if (document.getElementById('menu')) {
           var who = document.querySelector('header .who');
-          if (who) who.innerHTML = avat(state.user) + '<span>' + esc(state.user.nick || state.user.username) + '</span>' + (state.user.premium ? ICON.crown : '');
+          if (who) who.innerHTML = avat(state.user) + '<span>' + esc(state.user.nick || state.user.username) + '</span>';
         }
         toast(t('profile_saved'));
       }).catch(function (e) { toast(e.message, true); });
@@ -2540,12 +2616,11 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<div class="planbox"><div class="planhead">' + t('plan_1m') + '</div><div class="planprice">' + PRICE_1M + ' ' + t('baht') + '</div></div>' +
       '<div class="planbox"><div class="planhead">' + t('plan_1y') + ' <span class="updnew">' + t('best_value') + '</span></div><div class="planprice">' + PRICE_1Y + ' ' + t('baht') + '</div></div>' +
       '<div class="fsec">' + t('premium_perks') + '</div>' +
-      '<ul class="updlist">' +
-      '<li>' + t('perk_lv') + '</li>' +
-      '<li>' + t('perk_times') + '</li>' +
-      '<li>' + t('perk_crown') + '</li>' +
-      '<li>' + t('perk_size') + '</li>' +
-      '</ul>' +
+      '<div class="perklist">' +
+      [t('perk_lv'), t('perk_times'), t('perk_crown'), t('perk_size')].map(function (x) {
+        return '<div class="perkrow">' + ICON.check + '<span>' + x + '</span></div>';
+      }).join('') +
+      '</div>' +
       '<div class="hint">' + t('premium_buy_hint') + '</div>' +
       '</div><div class="foot">' +
       '<button class="btn ghost" id="pclose">' + t('close') + '</button>' +
@@ -2612,6 +2687,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   var PREMIUM_INVITE = '__PREMIUM_INVITE__';
   var PRICE_1M = __PRICE_1M__;
   var PRICE_1Y = __PRICE_1Y__;
+  var TURNSTILE_SITE = '__TURNSTILE_SITE__';
 
   function openUpdates() {
     var overlay = document.createElement('div');
@@ -2935,6 +3011,12 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 </script>
 </body>
 </html>`;
+app.use(function (err, req, res, next) {
+  console.error('unhandled:', err && err.message);
+  if (res.headersSent) return;
+  res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในระบบ' });
+});
+
 app.listen(PORT, function () {
   console.log(APP_NAME + ' listening on http://localhost:' + PORT);
   setTimeout(function () { notifyUpdateIfNeeded().catch(function () {}); }, 3000);
