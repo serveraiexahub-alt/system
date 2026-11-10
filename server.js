@@ -689,6 +689,20 @@ app.post('/api/discord/premium/cleared', function (req, res) {
   res.json({ ok: true });
 });
 
+app.post('/api/discord/ai-key', function (req, res) {
+  if (!botAuth(req, res)) return;
+  const key = String((req.body || {}).key || '').trim();
+  if (!/^sk-[A-Za-z0-9_-]{10,}$/.test(key)) return res.status(400).json({ error: 'รูปแบบ API key ไม่ถูกต้อง (ต้องขึ้นต้น sk-)' });
+  db.aiKey = key;
+  save();
+  res.json({ ok: true, masked: key.slice(0, 6) + '...' + key.slice(-4) });
+});
+
+app.get('/api/discord/ai-key', function (req, res) {
+  if (!botAuth(req, res)) return;
+  res.json({ ok: true, set: !!db.aiKey, masked: db.aiKey ? (db.aiKey.slice(0, 6) + '...' + db.aiKey.slice(-4)) : '' });
+});
+
 app.get('/api/discord/export', function (req, res) {
   if (!botAuth(req, res)) return;
   const payload = {
@@ -867,6 +881,92 @@ app.post('/api/login', limiter, function (req, res) {
 app.post('/api/logout', function (req, res) {
   res.setHeader('Set-Cookie', 'token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
   res.json({ ok: true });
+});
+
+const AI_MONTH_TOKENS = Number(process.env.AI_MONTH_TOKENS) || 250000;
+const AI_MODELS = ['deepseek-chat', 'deepseek-reasoner'];
+
+const AI_SYSTEM = [
+  'You are a senior engineer assisting with a Roblox script hosting site.',
+  'Answer in Thai unless the user writes English.',
+  'When the user asks to fix or change code: analyse the whole file, then output ONLY the minimal changed lines or a small diff block, never the whole file again, to save tokens.',
+  'Be direct, no filler, no disclaimers. If unsure about an API, say so instead of guessing.',
+  'Code must be runnable Lua/Luau for Roblox. Keep answers compact.'
+].join(' ');
+
+function aiMonth() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+function aiQuota(uid) {
+  db.aiUse = db.aiUse || {};
+  const m = aiMonth();
+  const rec = ownGet(db.aiUse, uid);
+  if (!rec || rec.month !== m) return { month: m, used: 0, left: AI_MONTH_TOKENS };
+  return { month: m, used: rec.tokens, left: Math.max(0, AI_MONTH_TOKENS - rec.tokens) };
+}
+
+function aiAdd(uid, tokens) {
+  db.aiUse = db.aiUse || {};
+  const m = aiMonth();
+  const rec = ownGet(db.aiUse, uid);
+  if (!rec || rec.month !== m) db.aiUse[uid] = { month: m, tokens: tokens };
+  else db.aiUse[uid] = { month: m, tokens: rec.tokens + tokens };
+  save();
+}
+
+app.get('/api/ai/status', auth, function (req, res) {
+  const u = ownGet(db.users, req.user.id);
+  const q = aiQuota(req.user.id);
+  res.json({
+    enabled: !!db.aiKey,
+    premium: isPremium(u),
+    models: AI_MODELS,
+    used: q.used, left: q.left, limit: AI_MONTH_TOKENS, month: q.month
+  });
+});
+
+app.post('/api/ai/chat', auth, async function (req, res) {
+  const u = ownGet(db.users, req.user.id);
+  if (!isPremium(u)) return res.status(403).json({ error: 'AI ใช้ได้เฉพาะพรีเมี่ยม' });
+  if (!db.aiKey) return res.status(503).json({ error: 'ยังไม่ได้ติดตั้ง API key (ใช้ !APIAI ใน Discord)' });
+  const q = aiQuota(req.user.id);
+  if (q.left <= 0) return res.status(429).json({ error: 'โควต้า AI หมดแล้ว (250k token/เดือน)', left: 0 });
+
+  const body = req.body || {};
+  const model = AI_MODELS.indexOf(String(body.model)) >= 0 ? String(body.model) : AI_MODELS[0];
+  const history = Array.isArray(body.messages) ? body.messages.slice(-20) : [];
+  const ctx = String(body.context || '').slice(0, 60000);
+
+  const msgs = [{ role: 'system', content: AI_SYSTEM }];
+  if (ctx) msgs.push({ role: 'system', content: 'ไฟล์/โฟลเดอร์ที่แนบมา:\n' + ctx });
+  for (const m of history) {
+    const role = m && m.role === 'assistant' ? 'assistant' : 'user';
+    const content = String((m && m.content) || '').slice(0, 20000);
+    if (content) msgs.push({ role: role, content: content });
+  }
+  if (msgs.length < 2) return res.status(400).json({ error: 'ไม่มีข้อความ' });
+
+  try {
+    const r = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + db.aiKey },
+      body: JSON.stringify({ model: model, messages: msgs, temperature: 0.3, max_tokens: 2048, stream: false })
+    });
+    const d = await r.json().catch(function () { return {}; });
+    if (!r.ok) {
+      const msg = (d && d.error && d.error.message) || ('HTTP ' + r.status);
+      return res.status(502).json({ error: 'DeepSeek: ' + msg });
+    }
+    const out = (d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content) || '';
+    const used = Number(d.usage && d.usage.total_tokens) || 0;
+    if (used) aiAdd(req.user.id, used);
+    const after = aiQuota(req.user.id);
+    res.json({ ok: true, reply: out, tokens: used, left: after.left, limit: after.limit });
+  } catch (e) {
+    res.status(502).json({ error: 'เชื่อมต่อ DeepSeek ไม่ได้: ' + e.message });
+  }
 });
 
 app.get('/api/stats', auth, function (req, res) {
@@ -1136,7 +1236,9 @@ app.post('/api/files', auth, function (req, res) {
   }
   const folder = folderRaw;
   const vis = 'public';
-  const f = { id: fid, owner: req.user.id, name: name, slug: slugify(name), code: code, created: now, updated: now, shares: [], invites: [], history: [], folder: folder, visibility: vis, rawKey: id(18) };
+  const f = { id: fid, owner: req.user.id, name: name, slug: slugify(name), code: code,
+    lockPage: req.body.lockPage !== false, deliver: (req.body.deliver === 'ready' ? 'ready' : 'raw'),
+    created: now, updated: now, shares: [], invites: [], history: [], folder: folder, visibility: vis, rawKey: id(18) };
   if (folder) {
     const fo = db.folders[folder];
     if (fo.owner === req.user.id) { fo.files = fo.files || []; if (fo.files.indexOf(fid) < 0) fo.files.push(fid); fo.updated = now; }
@@ -1521,7 +1623,7 @@ app.get('/raw/:id', function (req, res) {
   }
   const accept = String(req.headers.accept || '').toLowerCase();
   const ua = String(req.headers['user-agent'] || '').toLowerCase();
-  const isBrowser = accept.includes('text/html') && !ua.includes('roblox') && !ua.includes('httpget') && !ua.includes('wininet') && req.query.raw !== '1';
+  const isBrowser = f.lockPage !== false && accept.includes('text/html') && !ua.includes('roblox') && !ua.includes('httpget') && !ua.includes('wininet') && req.query.raw !== '1';
   if (isBrowser) {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
@@ -1680,7 +1782,9 @@ const HTML = `<!doctype html>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 :root { --bg:#000; --bg2:#0a0a0a; --panel:#0d0d0d; --line:#1c1c1c; --line2:#2a2a2a; --fg:#f5f5f5; --muted:#8a8a8a; }
 html, body { height: 100%; }
-body { background: var(--bg); color: var(--fg); font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+body { background: var(--bg); color: var(--fg); font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  background-image: url('https://i.ibb.co/mVfk18DZ/Messenger-creation-3-EEB72-A5-F43-E-4-BEC-9-AD2-F2-CF1-C824-EAA.gif'); background-size: cover; background-position: center; background-attachment: fixed; background-repeat: no-repeat; }
+body::before { content: ''; position: fixed; inset: 0; background: rgba(0,0,0,.82); z-index: -1; pointer-events: none; } }
 .i { width: 18px; height: 18px; flex: 0 0 auto; }
 a { color: var(--fg); text-decoration: none; }
 button { font-family: inherit; cursor: pointer; }
@@ -1848,6 +1952,22 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 .verifycode { font-family: ui-monospace, monospace; font-size: 22px; font-weight: 800; letter-spacing: 2px; background: var(--bg2); border: 1px dashed var(--line2); border-radius: 10px; padding: 16px; text-align: center; margin: 10px 0 12px; word-break: break-all; }
 .accrow { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; background: var(--bg2); border: 1px solid var(--line2); border-radius: 8px; margin-top: 8px; font-size: 13px; }
 .acclab { color: var(--muted); }
+#aiorb { position: fixed; width: 60px; height: 60px; border-radius: 50%; border: 2px solid var(--fg); background: var(--panel); padding: 0; overflow: hidden; z-index: 200; cursor: grab; box-shadow: 0 6px 22px rgba(0,0,0,.55); touch-action: none; }
+#aiorb img { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+#aiorb:active { cursor: grabbing; }
+#aipanel { position: fixed; right: 16px; bottom: 90px; width: min(420px, 92vw); height: min(560px, 76vh); background: var(--panel); border: 1px solid var(--line2); border-radius: 14px; z-index: 201; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 12px 40px rgba(0,0,0,.6); }
+.aihead { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line2); font-size: 13px; }
+.aihead b { flex: 1; }
+.aisel { background: var(--bg2); color: var(--fg); border: 1px solid var(--line2); border-radius: 7px; padding: 4px 6px; font-family: inherit; font-size: 11px; }
+.aibody { flex: 1; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.aimsg pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 12.5px; }
+.aimsg.me { align-self: flex-end; background: var(--fg); color: var(--bg); border-radius: 12px 12px 4px 12px; padding: 8px 11px; max-width: 88%; }
+.aimsg.bot { align-self: flex-start; background: var(--bg2); border: 1px solid var(--line2); border-radius: 12px 12px 12px 4px; padding: 8px 11px; max-width: 92%; }
+.aibar { display: flex; align-items: flex-end; gap: 6px; padding: 8px; border-top: 1px solid var(--line2); }
+.aiinput { flex: 1; background: var(--bg2); color: var(--fg); border: 1px solid var(--line2); border-radius: 9px; padding: 8px; font-family: inherit; font-size: 12.5px; resize: none; }
+.aictx { font-size: 10px; color: var(--muted); }
+.aifoot { padding: 4px 10px 8px; font-size: 10px; color: var(--muted); }
+.aimodal { max-height: 55vh; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
 .folderpage { max-width: 900px; margin: 0 auto; padding: 18px; }
 .fphead { display: flex; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--line2); border-radius: 14px; background: var(--bg2); margin-bottom: 12px; }
 .fpav { width: 46px; height: 46px; border-radius: 12px; background: var(--panel); display: flex; align-items: center; justify-content: center; overflow: hidden; flex: 0 0 auto; }
@@ -1931,8 +2051,8 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     copy2: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>'
   };
   var T = {
-    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', updates:'อัปเดต', theme:'ปรับสีธีม', latest:'ล่าสุด', premium_signup:'สมัครพรีเมี่ยม', stats:'สถิติเว็บ', open_folder_first:'เปิดโฟลเดอร์ก่อน แล้วสร้างไฟล์ข้างใน', folder_desc:'โปรไฟล์โฟลเดอร์', folder_desc_ph:'คำอธิบายสั้นๆ', folder_pic:'รูปโฟลเดอร์', folder_pic_set:'ตั้งรูปแล้ว', img_too_big:'รูปใหญ่เกิน 300KB', in_folder:'จะถูกสร้างในโฟลเดอร์นี้', stat_users:'บัญชีที่สมัครแล้ว', stat_files:'ไฟล์ที่สร้างแล้ว', stat_folders:'โฟลเดอร์', stat_public:'ไฟล์สาธารณะ', premium_active:'คุณเป็นพรีเมี่ยมอยู่แล้ว 👑', plan_1m:'พรีเมี่ยม 1 เดือน', plan_1y:'พรีเมี่ยม 1 ปี', baht:'บาท', best_value:'คุ้มสุด', premium_perks:'สิทธิพิเศษ', perk_lv:'ใช้ปกปิดโค้ดได้ทุกระดับ 1-6', perk_times:'ปกปิดได้ 10 ครั้ง/วัน (ฟรี 5 ครั้ง)', perk_crown:'ไอคอนมงกุฎหลังชื่อ', perk_size:'สร้างไฟล์ได้สูงสุด 20 MB', premium_buy_hint:'ซื้อผ่าน Discord — กดปุ่มด้านล่างเพื่อเข้ากลุ่ม', premium_join:'ไปสมัครใน Discord', folder_required:'โฟลเดอร์ (จำเป็น)', folder_vis_hint:'การมองเห็นปรับที่โฟลเดอร์เท่านั้น', folder_required_toast:'ต้องเลือกโฟลเดอร์ก่อนสร้างไฟล์', captcha:'ยืนยันตัวตน', captcha_ph:'ใส่เลข 4 หลัก', captcha_hint:'พิมพ์เลขในรูป (ติดกัน)', verify_title:'ยืนยันบัญชีผ่าน Discord', verify_steps:'กดลิงก์เข้ากลุ่ม Discord → กดปุ่ม ยืนยันบัญชี → ใส่รหัสข้างบน → ระบบจะสมัครให้อัตโนมัติ', verify_join:'เข้ากลุ่ม Discord', verify_waiting:'รอการยืนยัน... (อย่าปิดหน้านี้)', verify_expired:'หมดเวลา — เริ่มสมัครใหม่', save_acc_title:'บันทึกบัญชีไหม?', save_acc_hint:'จำรหัสผ่านไว้ด้วย — ถ้าลืมจะเข้าสู่ระบบไม่ได้', save_acc_copy:'คัดลอก', save_acc_dl:'ดาวน์โหลด .txt', save_acc_file_title:'บัญชี สกัด HUB', save_acc_file_note:'เก็บไฟล์นี้ไว้ให้ดี อย่าให้ใครเห็น', obf:'ปกปิดโค้ด Lua', obf_title:'Lua Obfuscator', obf_input:'โค้ด Lua', obf_input_ph:'วางโค้ด Lua ที่นี่ หรือกดอัปโหลดไฟล์', obf_pick:'อัปโหลดไฟล์', obf_no_file:'ยังไม่ได้เลือกไฟล์', obf_run:'ปกปิด', obf_running:'กำลังปกปิด...', obf_output:'ผลลัพธ์', obf_copy:'คัดลอกผลลัพธ์', obf_save:'สร้างไฟล์จากผลลัพธ์', obf_name:'ชื่อไฟล์', obf_name_ph:'obfuscated', obf_options:'ตัวเลือก', obf_opt_rename:'เปลี่ยนชื่อตัวแปร', obf_opt_strings:'เข้ารหัสสตริง', obf_opt_numbers:'แปลงตัวเลข', obf_opt_junk:'ใส่โค้ดหลอก', obf_opt_wrap:'ห่อด้วย loader', obf_opt_hide:'ซ่อน error', obf_done:'ปกปิดเสร็จแล้ว', obf_empty:'ใส่โค้ดก่อน', obf_saved:'สร้างไฟล์แล้ว', obf_stats:'ผลลัพธ์', obf_strong:'โหมดแน่นหนา', obf_clear:'ล้าง', obf_level:'ระดับความยาก', obf_lv1:'1 · เบา', obf_lv2:'2 · กลาง', obf_lv3:'3 · หนัก', obf_lv4:'4 · โหด', obf_lv5:'5 · สุดโหด', obf_lv1_hint:'เร็วสุด ไฟล์เล็ก แต่แกะง่าย', obf_lv2_hint:'สมดุล ไฟล์กลางๆ', obf_lv3_hint:'แนะนำ — แกะยาก ไฟล์ใหญ่ขึ้น', obf_lv4_hint:'โหด 3 ชั้น + ขยะเยอะ (พรีเมียม)', obf_lv5_hint:'สุดโหด — แปลงเป็น bytecode VM (พรีเมียม)', obf_lv6_hint:'โหดสุด — VM + 3 ชั้น + ขยะ 40 เท่า (พรีเมียม · ไฟล์ใหญ่)', obf_remote:'เก็บตัวแปรไว้บนเว็บ', obf_remote_on:'เปิด (สคริปต์จะดึงค่าตอนรัน)', obf_edit:'แก้ไขไฟล์', obf_updated:'อัปเดตไฟล์แล้ว', obf_left:'เหลือ', obf_limit:'ใช้ครบ 5 ครั้ง/วันแล้ว', obf_copy_blocked:'โหมดเก็บตัวแปรบนเว็บ — คัดลอกไม่ได้ ต้องสร้างหรือแก้ไขไฟล์', obf_premium_lv:'ระดับ 4-6 ต้องใช้พรีเมียม 👑' },
-    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', updates:'Updates', theme:'Theme color', latest:'NEW', premium_signup:'Get premium', stats:'Site stats', open_folder_first:'Open a folder first, then create the file inside', folder_desc:'Folder profile', folder_desc_ph:'Short description', folder_pic:'Folder picture', folder_pic_set:'Picture set', img_too_big:'Image larger than 300KB', in_folder:'Will be created in this folder', stat_users:'Accounts created', stat_files:'Files created', stat_folders:'Folders', stat_public:'Public files', premium_active:'You already have premium 👑', plan_1m:'Premium 1 month', plan_1y:'Premium 1 year', baht:'THB', best_value:'Best value', premium_perks:'Benefits', perk_lv:'Protect code at every level 1-6', perk_times:'10 protections per day (free: 5)', perk_crown:'Crown next to your name', perk_size:'Files up to 20 MB', premium_buy_hint:'Purchase through Discord — press the button below to join', premium_join:'Join Discord', folder_required:'Folder (required)', folder_vis_hint:'Visibility is set on the folder', folder_required_toast:'Pick a folder before creating a file', captcha:'Verification', captcha_ph:'Enter 4 digits', captcha_hint:'Type the digits shown in the image', verify_title:'Verify via Discord', verify_steps:'Join the Discord → press the verify button → enter the code above → your account is created automatically', verify_join:'Join Discord', verify_waiting:'Waiting for verification... (keep this page open)', verify_expired:'Expired — start again', save_acc_title:'Save your account?', save_acc_hint:'Remember your password — you cannot log in without it', save_acc_copy:'Copy', save_acc_dl:'Download .txt', save_acc_file_title:'Sakad HUB account', save_acc_file_note:'Keep this file safe, do not share it', obf:'Protect Lua code', obf_title:'Lua Obfuscator', obf_input:'Lua code', obf_input_ph:'Paste Lua code here, or upload a file', obf_pick:'Upload file', obf_no_file:'No file selected', obf_run:'Protect', obf_running:'Protecting...', obf_output:'Output', obf_copy:'Copy output', obf_save:'Create file from output', obf_name:'File name', obf_name_ph:'obfuscated', obf_options:'Options', obf_opt_rename:'Rename variables', obf_opt_strings:'Encrypt strings', obf_opt_numbers:'Transform numbers', obf_opt_junk:'Insert decoy code', obf_opt_wrap:'Wrap in loader', obf_opt_hide:'Hide errors', obf_done:'Done', obf_empty:'Enter code first', obf_saved:'File created', obf_stats:'Result', obf_strong:'Strong mode', obf_clear:'Clear', obf_level:'Difficulty', obf_lv1:'1 · Light', obf_lv2:'2 · Medium', obf_lv3:'3 · Heavy', obf_lv4:'4 · Brutal', obf_lv5:'5 · Insane', obf_lv1_hint:'Fastest, smallest file, easy to crack', obf_lv2_hint:'Balanced, medium size', obf_lv3_hint:'Recommended — hard to crack', obf_lv4_hint:'Brutal: 3 layers + heavy junk', obf_lv5_hint:'Insane — compiles to a bytecode VM (no loadstring of your code)', obf_lv6_hint:'Max — VM + 3 pack layers + 40x junk (very large file)', obf_remote:'Remote variables', obf_remote_on:'Enable (script fetches values at runtime)', obf_edit:'Edit file', obf_updated:'File updated', obf_left:'Left', obf_limit:'Daily limit reached (5/day)', obf_copy_blocked:'Remote mode — copying disabled, use create or edit file', obf_premium_lv:'Levels 4-6 require premium 👑' }
+    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', updates:'อัปเดต', theme:'ปรับสีธีม', latest:'ล่าสุด', premium_signup:'สมัครพรีเมี่ยม', stats:'สถิติเว็บ', open_folder_first:'เปิดโฟลเดอร์ก่อน แล้วสร้างไฟล์ข้างใน', folder_desc:'โปรไฟล์โฟลเดอร์', folder_desc_ph:'คำอธิบายสั้นๆ', folder_pic:'รูปโฟลเดอร์', folder_pic_set:'ตั้งรูปแล้ว', img_too_big:'รูปใหญ่เกิน 300KB', in_folder:'จะถูกสร้างในโฟลเดอร์นี้', stat_users:'บัญชีที่สมัครแล้ว', stat_files:'ไฟล์ที่สร้างแล้ว', stat_folders:'โฟลเดอร์', stat_public:'ไฟล์สาธารณะ', premium_active:'คุณเป็นพรีเมี่ยมอยู่แล้ว 👑', plan_1m:'พรีเมี่ยม 1 เดือน', plan_1y:'พรีเมี่ยม 1 ปี', baht:'บาท', best_value:'คุ้มสุด', premium_perks:'สิทธิพิเศษ', perk_lv:'ใช้ปกปิดโค้ดได้ทุกระดับ 1-6', perk_times:'ปกปิดได้ 10 ครั้ง/วัน (ฟรี 5 ครั้ง)', perk_crown:'ไอคอนมงกุฎหลังชื่อ', perk_size:'สร้างไฟล์ได้สูงสุด 20 MB', premium_buy_hint:'ซื้อผ่าน Discord — กดปุ่มด้านล่างเพื่อเข้ากลุ่ม', my_folders:'โฟลเดอร์ของฉัน', ai_attach:'แนบไฟล์/โฟลเดอร์', raw_lock_q:'ล็อกหน้าลิงก์ raw?', raw_lock_yes:'ล็อก (เห็นหน้า "คุณมาผิดซอยแล้ว")', deliver_q:'ต้องการอะไรจากการสร้างไฟล์', deliver_raw:'แค่ลิงก์ raw', deliver_ready:'พร้อมรันใน Roblox', ai_ph:'ถาม AI...', ai_send:'ส่ง', ai_empty:'เริ่มคุยกับ AI ได้เลย', ai_left:'โควต้า AI', ai_nokey:'ยังไม่ได้ติดตั้ง API key', ai_ctx_on:'แนบแล้ว', create_folder_first:'สร้างโฟลเดอร์ก่อน แล้วไฟล์จะอยู่ข้างใน', premium_join:'ไปสมัครใน Discord', folder_required:'โฟลเดอร์ (จำเป็น)', folder_vis_hint:'การมองเห็นปรับที่โฟลเดอร์เท่านั้น', folder_required_toast:'ต้องเลือกโฟลเดอร์ก่อนสร้างไฟล์', captcha:'ยืนยันตัวตน', captcha_ph:'ใส่เลข 4 หลัก', captcha_hint:'พิมพ์เลขในรูป (ติดกัน)', verify_title:'ยืนยันบัญชีผ่าน Discord', verify_steps:'กดลิงก์เข้ากลุ่ม Discord → กดปุ่ม ยืนยันบัญชี → ใส่รหัสข้างบน → ระบบจะสมัครให้อัตโนมัติ', verify_join:'เข้ากลุ่ม Discord', verify_waiting:'รอการยืนยัน... (อย่าปิดหน้านี้)', verify_expired:'หมดเวลา — เริ่มสมัครใหม่', save_acc_title:'บันทึกบัญชีไหม?', save_acc_hint:'จำรหัสผ่านไว้ด้วย — ถ้าลืมจะเข้าสู่ระบบไม่ได้', save_acc_copy:'คัดลอก', save_acc_dl:'ดาวน์โหลด .txt', save_acc_file_title:'บัญชี สกัด HUB', save_acc_file_note:'เก็บไฟล์นี้ไว้ให้ดี อย่าให้ใครเห็น', obf:'ปกปิดโค้ด Lua', obf_title:'Lua Obfuscator', obf_input:'โค้ด Lua', obf_input_ph:'วางโค้ด Lua ที่นี่ หรือกดอัปโหลดไฟล์', obf_pick:'อัปโหลดไฟล์', obf_no_file:'ยังไม่ได้เลือกไฟล์', obf_run:'ปกปิด', obf_running:'กำลังปกปิด...', obf_output:'ผลลัพธ์', obf_copy:'คัดลอกผลลัพธ์', obf_save:'สร้างไฟล์จากผลลัพธ์', obf_name:'ชื่อไฟล์', obf_name_ph:'obfuscated', obf_options:'ตัวเลือก', obf_opt_rename:'เปลี่ยนชื่อตัวแปร', obf_opt_strings:'เข้ารหัสสตริง', obf_opt_numbers:'แปลงตัวเลข', obf_opt_junk:'ใส่โค้ดหลอก', obf_opt_wrap:'ห่อด้วย loader', obf_opt_hide:'ซ่อน error', obf_done:'ปกปิดเสร็จแล้ว', obf_empty:'ใส่โค้ดก่อน', obf_saved:'สร้างไฟล์แล้ว', obf_stats:'ผลลัพธ์', obf_strong:'โหมดแน่นหนา', obf_clear:'ล้าง', obf_level:'ระดับความยาก', obf_lv1:'1 · เบา', obf_lv2:'2 · กลาง', obf_lv3:'3 · หนัก', obf_lv4:'4 · โหด', obf_lv5:'5 · สุดโหด', obf_lv1_hint:'เร็วสุด ไฟล์เล็ก แต่แกะง่าย', obf_lv2_hint:'สมดุล ไฟล์กลางๆ', obf_lv3_hint:'แนะนำ — แกะยาก ไฟล์ใหญ่ขึ้น', obf_lv4_hint:'โหด 3 ชั้น + ขยะเยอะ (พรีเมียม)', obf_lv5_hint:'สุดโหด — แปลงเป็น bytecode VM (พรีเมียม)', obf_lv6_hint:'โหดสุด — VM + 3 ชั้น + ขยะ 40 เท่า (พรีเมียม · ไฟล์ใหญ่)', obf_remote:'เก็บตัวแปรไว้บนเว็บ', obf_remote_on:'เปิด (สคริปต์จะดึงค่าตอนรัน)', obf_edit:'แก้ไขไฟล์', obf_updated:'อัปเดตไฟล์แล้ว', obf_left:'เหลือ', obf_limit:'ใช้ครบ 5 ครั้ง/วันแล้ว', obf_copy_blocked:'โหมดเก็บตัวแปรบนเว็บ — คัดลอกไม่ได้ ต้องสร้างหรือแก้ไขไฟล์', obf_premium_lv:'ระดับ 4-6 ต้องใช้พรีเมียม 👑' },
+    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', updates:'Updates', theme:'Theme color', latest:'NEW', premium_signup:'Get premium', stats:'Site stats', open_folder_first:'Open a folder first, then create the file inside', folder_desc:'Folder profile', folder_desc_ph:'Short description', folder_pic:'Folder picture', folder_pic_set:'Picture set', img_too_big:'Image larger than 300KB', in_folder:'Will be created in this folder', stat_users:'Accounts created', stat_files:'Files created', stat_folders:'Folders', stat_public:'Public files', premium_active:'You already have premium 👑', plan_1m:'Premium 1 month', plan_1y:'Premium 1 year', baht:'THB', best_value:'Best value', premium_perks:'Benefits', perk_lv:'Protect code at every level 1-6', perk_times:'10 protections per day (free: 5)', perk_crown:'Crown next to your name', perk_size:'Files up to 20 MB', premium_buy_hint:'Purchase through Discord — press the button below to join', my_folders:'My folders', ai_attach:'Attach file/folder', raw_lock_q:'Lock the raw page?', raw_lock_yes:'Lock (show the wrong-alley page)', deliver_q:'What do you want from this file', deliver_raw:'Raw link only', deliver_ready:'Ready to run in Roblox', ai_ph:'Ask the AI...', ai_send:'Send', ai_empty:'Start chatting with the AI', ai_left:'AI quota', ai_nokey:'API key not installed', ai_ctx_on:'attached', create_folder_first:'Create a folder first, files live inside it', premium_join:'Join Discord', folder_required:'Folder (required)', folder_vis_hint:'Visibility is set on the folder', folder_required_toast:'Pick a folder before creating a file', captcha:'Verification', captcha_ph:'Enter 4 digits', captcha_hint:'Type the digits shown in the image', verify_title:'Verify via Discord', verify_steps:'Join the Discord → press the verify button → enter the code above → your account is created automatically', verify_join:'Join Discord', verify_waiting:'Waiting for verification... (keep this page open)', verify_expired:'Expired — start again', save_acc_title:'Save your account?', save_acc_hint:'Remember your password — you cannot log in without it', save_acc_copy:'Copy', save_acc_dl:'Download .txt', save_acc_file_title:'Sakad HUB account', save_acc_file_note:'Keep this file safe, do not share it', obf:'Protect Lua code', obf_title:'Lua Obfuscator', obf_input:'Lua code', obf_input_ph:'Paste Lua code here, or upload a file', obf_pick:'Upload file', obf_no_file:'No file selected', obf_run:'Protect', obf_running:'Protecting...', obf_output:'Output', obf_copy:'Copy output', obf_save:'Create file from output', obf_name:'File name', obf_name_ph:'obfuscated', obf_options:'Options', obf_opt_rename:'Rename variables', obf_opt_strings:'Encrypt strings', obf_opt_numbers:'Transform numbers', obf_opt_junk:'Insert decoy code', obf_opt_wrap:'Wrap in loader', obf_opt_hide:'Hide errors', obf_done:'Done', obf_empty:'Enter code first', obf_saved:'File created', obf_stats:'Result', obf_strong:'Strong mode', obf_clear:'Clear', obf_level:'Difficulty', obf_lv1:'1 · Light', obf_lv2:'2 · Medium', obf_lv3:'3 · Heavy', obf_lv4:'4 · Brutal', obf_lv5:'5 · Insane', obf_lv1_hint:'Fastest, smallest file, easy to crack', obf_lv2_hint:'Balanced, medium size', obf_lv3_hint:'Recommended — hard to crack', obf_lv4_hint:'Brutal: 3 layers + heavy junk', obf_lv5_hint:'Insane — compiles to a bytecode VM (no loadstring of your code)', obf_lv6_hint:'Max — VM + 3 pack layers + 40x junk (very large file)', obf_remote:'Remote variables', obf_remote_on:'Enable (script fetches values at runtime)', obf_edit:'Edit file', obf_updated:'File updated', obf_left:'Left', obf_limit:'Daily limit reached (5/day)', obf_copy_blocked:'Remote mode — copying disabled, use create or edit file', obf_premium_lv:'Levels 4-6 require premium 👑' }
   };
   var LANG = localStorage.getItem('lang') || 'th';
   function t(k) { var d = T[LANG] || T.th; return d[k] != null ? d[k] : (T.th[k] != null ? T.th[k] : k); }
@@ -2147,6 +2267,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     return '<span class="' + c + '">' + ICON.user + '</span>';
   }
   function renderApp() {
+    setTimeout(mountAiOrb, 80);
     var me = state.user;
     app.innerHTML = '<header>' + brand() + '<div class="right">' +
       '<div class="who">' + avat(me) + '<span>' + esc(me.nick || me.username) + '</span></div>' +
@@ -2300,14 +2421,14 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   }
   function renderFiles() {
     var v = document.getElementById('view');
-    v.innerHTML = '<div class="bar"><h2>' + t('my_files') + '</h2><div class="baract">' +
+    v.innerHTML = '<div class="bar"><h2>' + t('my_folders') + '</h2><div class="baract">' +
       '<button class="btn small" id="newfolder">' + ICON.folder + ' ' + t('new_folder') + '</button></div></div>' +
       '<div class="grid" id="grid"></div>';
     var grid = document.getElementById('grid');
     document.getElementById('newfolder').onclick = function () { openFolderModal(); };
-    if (!state.files.length) { grid.innerHTML = emptyBox(ICON.file, t('no_files'), t('create_first')); return; }
-    grid.innerHTML = state.files.map(fileCard).join('');
-    bindFiles(grid, state.files);
+    if (!state.folders.length) { grid.innerHTML = emptyBox(ICON.folder, t('no_folders'), t('create_folder_first')); return; }
+    grid.innerHTML = state.folders.map(folderCard).join('');
+    bindFolders(grid, state.folders);
   }
   function runSearch() {
     var q = state.q;
@@ -2600,11 +2721,18 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<button class="btn ghost uploadbtn" id="fpick" type="button">' + ICON.file + ' ' + t('choose_file') + '</button>' +
       '<input type="file" id="ffile" accept=".lua,.txt,.js,.json,text/plain" style="display:none">' +
       '<div class="hint" id="ffname">' + t('no_file') + '</div></div>' +
+      (editing ? '' : ('<div class="field"><label>' + ICON.eye + ' ' + t('raw_lock_q') + '</label>' +
+        '<label class="chk"><input type="checkbox" id="flock" checked> ' + t('raw_lock_yes') + '</label></div>' +
+        '<div class="field"><label>' + ICON.link + ' ' + t('deliver_q') + '</label>' + picker('fdeliverpick', [
+          { value: 'raw', label: t('deliver_raw'), icon: ICON.link },
+          { value: 'ready', label: t('deliver_ready'), icon: ICON.code }
+        ], 'raw', t('pick_placeholder')) + '</div>')) +
       '<div class="hint">' + t('raw_hint') + '</div></div>' +
       '<div class="foot"><button class="btn ghost" id="cancel">' + t('cancel') + '</button><button class="btn" id="save">' + (editing ? t('save') : t('create')) + '</button></div></div>';
     document.body.appendChild(overlay);
     var nameEl = overlay.querySelector('#fname'), codeEl = overlay.querySelector('#fcode');
     if (!presetFolder) bindPicker(overlay, 'ffolderpick');
+    if (!editing) bindPicker(overlay, 'fdeliverpick');
     var foOpts = [];
     state.folders.filter(function (x) { return x.role === 'owner'; }).forEach(function (fo) { foOpts.push({ value: fo.id, label: fo.name, icon: ICON.folder }); });
     var fw = overlay.querySelector('#ffolderpick .pklist');
@@ -2633,6 +2761,11 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       var folderId = presetFolder || pickerVal(overlay, 'ffolderpick') || '';
       if (!folderId) { toast(t('folder_required_toast'), true); return; }
       var body = { name: nameEl.value.trim(), code: codeEl.value, folder: folderId };
+      if (!editing) {
+        var lk = overlay.querySelector('#flock');
+        body.lockPage = lk ? !!lk.checked : true;
+        body.deliver = pickerVal(overlay, 'fdeliverpick') || 'raw';
+      }
       api(editing ? '/api/files/' + id : '/api/files', { method: editing ? 'PUT' : 'POST', body: body })
         .then(function () { overlay.remove(); loadFiles(); loadFolders(); toast(t('saved')); })
         .catch(function (e) { toast(e.message, true); });
@@ -2733,6 +2866,168 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     }
     return '<svg viewBox="0 0 20 14" width="17" height="12" style="flex:0 0 auto">' + bars + '</svg>';
   }
+  function mountAiOrb() {
+    if (!state.user || !state.user.premium) {
+      var old = document.getElementById('aiorb'); if (old) old.remove();
+      var oldp = document.getElementById('aipanel'); if (oldp) oldp.remove();
+      return;
+    }
+    if (document.getElementById('aiorb')) return;
+    var orb = document.createElement('button');
+    orb.id = 'aiorb';
+    orb.type = 'button';
+    orb.title = 'AI';
+    orb.innerHTML = '<img src="https://files.catbox.moe/okwlyx.png" alt="">';
+    var pos = { x: null, y: null };
+    try { var sv = JSON.parse(localStorage.getItem('aiOrbPos') || 'null'); if (sv) pos = sv; } catch (e) {}
+    orb.style.left = (pos.x === null ? (window.innerWidth - 92) : pos.x) + 'px';
+    orb.style.top = (pos.y === null ? (window.innerHeight - 130) : pos.y) + 'px';
+    document.body.appendChild(orb);
+
+    var drag = null;
+    function startDrag(e) {
+      var p = e.touches ? e.touches[0] : e;
+      drag = { dx: p.clientX - orb.offsetLeft, dy: p.clientY - orb.offsetTop, moved: false };
+      e.preventDefault();
+    }
+    function moveDrag(e) {
+      if (!drag) return;
+      var p = e.touches ? e.touches[0] : e;
+      var nx = Math.max(8, Math.min(window.innerWidth - 72, p.clientX - drag.dx));
+      var ny = Math.max(8, Math.min(window.innerHeight - 72, p.clientY - drag.dy));
+      if (Math.abs(nx - orb.offsetLeft) > 3 || Math.abs(ny - orb.offsetTop) > 3) drag.moved = true;
+      orb.style.left = nx + 'px';
+      orb.style.top = ny + 'px';
+      e.preventDefault();
+    }
+    function endDrag() {
+      if (!drag) return;
+      var moved = drag.moved;
+      drag = null;
+      try { localStorage.setItem('aiOrbPos', JSON.stringify({ x: orb.offsetLeft, y: orb.offsetTop })); } catch (e) {}
+      if (false) openAi();
+    }
+    orb.addEventListener('click', function (e) {
+      if (drag && drag.moved) return;
+      e.preventDefault();
+      openAi();
+    });
+    orb.addEventListener('mousedown', startDrag);
+    document.addEventListener('mousemove', moveDrag);
+    document.addEventListener('mouseup', endDrag);
+    orb.addEventListener('touchstart', startDrag, { passive: false });
+    document.addEventListener('touchmove', moveDrag, { passive: false });
+    document.addEventListener('touchend', endDrag);
+  }
+
+  var aiState = { messages: [], model: 'deepseek-chat', context: '', left: 0, limit: 0 };
+
+  function openAi() {
+    var ex = document.getElementById('aipanel');
+    if (ex) { ex.remove(); return; }
+    var panel = document.createElement('div');
+    panel.id = 'aipanel';
+    panel.innerHTML = '<div class="aihead"><b>🤖 AI (DeepSeek)</b>' +
+      '<select id="aimodel" class="aisel"><option value="deepseek-chat">deepseek-chat</option><option value="deepseek-reasoner">deepseek-reasoner</option></select>' +
+      '<button class="iconbtn" id="aiclose">' + ICON.x + '</button></div>' +
+      '<div class="aibody" id="aibody"></div>' +
+      '<div class="aibar"><button class="iconbtn" id="aifile" title="' + t('ai_attach') + '">' + ICON.file + '</button>' +
+      '<span class="aictx" id="aictx"></span>' +
+      '<textarea class="aiinput" id="aiinput" rows="2" placeholder="' + t('ai_ph') + '"></textarea>' +
+      '<button class="btn small" id="aisend">' + t('ai_send') + '</button></div>' +
+      '<div class="aifoot" id="aifoot"></div>';
+    document.body.appendChild(panel);
+    var body = panel.querySelector('#aibody');
+    panel.querySelector('#aiclose').onclick = function () { panel.remove(); };
+    panel.querySelector('#aimodel').value = aiState.model;
+    panel.querySelector('#aimodel').onchange = function (e) { aiState.model = e.target.value; };
+    panel.querySelector('#aifile').onclick = attachForAi;
+    function paint() {
+      body.innerHTML = aiState.messages.map(function (m) {
+        return '<div class="aimsg ' + (m.role === 'assistant' ? 'bot' : 'me') + '"><pre>' + esc(m.content) + '</pre></div>';
+      }).join('') || '<div class="hint" style="margin:10px">' + t('ai_empty') + '</div>';
+      body.scrollTop = body.scrollHeight;
+      var f = panel.querySelector('#aifoot');
+      if (f) f.textContent = t('ai_left') + ' ' + aiState.left.toLocaleString() + ' / ' + aiState.limit.toLocaleString();
+    }
+    api('/api/ai/status').then(function (d) {
+      aiState.left = d.left; aiState.limit = d.limit;
+      if (!d.enabled) body.innerHTML = '<div class="hint" style="margin:10px">' + t('ai_nokey') + '</div>';
+      paint();
+    }).catch(function () { paint(); });
+    paint();
+    function send() {
+      var ta = panel.querySelector('#aiinput');
+      var text = ta.value.trim();
+      if (!text) return;
+      ta.value = '';
+      aiState.messages.push({ role: 'user', content: text });
+      paint();
+      api('/api/ai/chat', { method: 'POST', body: { model: aiState.model, messages: aiState.messages, context: aiState.context } })
+        .then(function (d) {
+          aiState.messages.push({ role: 'assistant', content: d.reply });
+          aiState.left = d.left;
+          paint();
+        })
+        .catch(function (e) {
+          aiState.messages.push({ role: 'assistant', content: '⚠️ ' + e.message });
+          paint();
+        });
+    }
+    panel.querySelector('#aisend').onclick = send;
+    panel.querySelector('#aiinput').onkeydown = function (e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    };
+    paint();
+  }
+
+  function attachForAi() {
+    var overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    var files = state.files || [];
+    var folders = (state.folders || []).filter(function (f) { return f.role === 'owner'; });
+    overlay.innerHTML = '<div class="modal smallm"><h3>' + ICON.file + ' ' + t('ai_attach') + '</h3>' +
+      '<div class="body aimodal">' +
+      '<div class="fsec">' + t('res_files') + '</div>' +
+      (files.length ? files.map(function (f) { return '<button class="btn ghost aifile" data-id="' + esc(f.id) + '">' + ICON.file + ' ' + esc(f.name) + '</button>'; }).join('') : '<div class="hint">' + t('no_files') + '</div>') +
+      '<div class="fsec">' + t('res_folders') + '</div>' +
+      (folders.length ? folders.map(function (f) { return '<button class="btn ghost aifold" data-id="' + esc(f.id) + '">' + ICON.folder + ' ' + esc(f.name) + '</button>'; }).join('') : '<div class="hint">' + t('no_folders') + '</div>') +
+      '</div><div class="foot"><button class="btn ghost" id="aicancel">' + t('cancel') + '</button></div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('#aicancel').onclick = function () { overlay.remove(); };
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+    Array.prototype.forEach.call(overlay.querySelectorAll('.aifile'), function (b) {
+      b.onclick = function () {
+        api('/api/files/' + b.getAttribute('data-id')).then(function (d) {
+          aiState.context += '\\n--- ไฟล์: ' + d.name + ' ---\\n' + d.code;
+          var c = document.getElementById('aictx'); if (c) c.textContent = t('ai_ctx_on');
+          overlay.remove();
+        }).catch(function (e) { toast(e.message, true); });
+      };
+    });
+    Array.prototype.forEach.call(overlay.querySelectorAll('.aifold'), function (b) {
+      b.onclick = function () {
+        api('/api/folders/' + b.getAttribute('data-id')).then(function (d) {
+          var list = (d.folder.files || []);
+          var out = [];
+          var i = 0;
+          (function next() {
+            if (i >= list.length) {
+              aiState.context += '\\n--- โฟลเดอร์: ' + d.folder.name + ' ---\\n' + out.join('\\n');
+              var c = document.getElementById('aictx'); if (c) c.textContent = t('ai_ctx_on');
+              overlay.remove();
+              return;
+            }
+            api('/api/files/' + list[i].id).then(function (f) {
+              out.push('### ' + f.name + '\\n' + f.code);
+              i++; next();
+            }).catch(function () { i++; next(); });
+          })();
+        }).catch(function (e) { toast(e.message, true); });
+      };
+    });
+  }
+
   function openStats() {
     var overlay = document.createElement('div');
     overlay.className = 'overlay';

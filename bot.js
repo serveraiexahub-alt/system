@@ -478,6 +478,37 @@ client.on('messageCreate', async function (message) {
     const content = (message.content || '').trim();
     if (!content.startsWith('!')) return;
     const cmd = content.replace(/^!+/, '').split(/\s+/)[0];
+    if (cmd === 'APIAI' || cmd === 'apiai') {
+      if (!isOwnerOrStaff(message.member)) return message.reply({ content: 'เฉพาะพนักงานเท่านั้น' });
+      const parts = content.split(/\s+/);
+      const key = (parts[1] || '').trim();
+      if (!key) return message.reply({ content: 'วิธีใช้: !APIAI sk-xxxx' , flags: MessageFlags.Ephemeral}).catch(function () {});
+      const r = await fetch(WEB_URL + '/api/discord/ai-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
+        body: JSON.stringify({ key: key })
+      });
+      const d = await r.json().catch(function () { return {}; });
+      const reply = r.ok ? ('✅ ติดตั้ง API key แล้ว: `' + d.masked + '`') : ('❌ ' + (d.error || r.status));
+      try { await message.author.send({ content: reply }); } catch (e) {}
+      return message.reply({ content: r.ok ? '✅ ติดตั้ง API key เรียบร้อย (ส่งรายละเอียดทาง DM)' : ('❌ ' + (d.error || 'ติดตั้งไม่สำเร็จ')) }).catch(function () {});
+    }
+
+    if (cmd === 'help') {
+      return message.reply({
+        embeds: [new EmbedBuilder()
+          .setColor(0x9b59b6)
+          .setTitle('📖 คำสั่งบอท')
+          .setDescription(
+            '**`!เซฟข้อมูลทั้งหมด`** — สำรองข้อมูลเว็บ + บอท เป็นไฟล์\n' +
+            '**`!อัปข้อมูล`** — นำเข้าไฟล์สำรอง (แนบหรือตอบกลับไฟล์ .json)\n' +
+            '**`!APIAI sk-xxxx`** — ติดตั้ง DeepSeek API key ให้ระบบ AI (พนักงาน)\n' +
+            '**`!help`** — แสดงคำสั่งทั้งหมด'
+          )
+          .setFooter({ text: 'เฉพาะพนักงาน: เซฟ/อัปข้อมูล, APIAI' })]
+      });
+    }
+
     if (cmd !== 'เซฟข้อมูลทั้งหมด' && cmd !== 'อัปข้อมูล') return;
     if (!isOwnerOrStaff(message.member)) {
       return message.reply({ content: 'เฉพาะพนักงานเท่านั้น' }).catch(function () {});
