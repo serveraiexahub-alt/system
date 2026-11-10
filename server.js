@@ -1922,7 +1922,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     camera: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>',
     chart: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"></path></svg>',
     palette: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><circle cx="8.5" cy="9.5" r="1.2" fill="currentColor"></circle><circle cx="15.5" cy="9.5" r="1.2" fill="currentColor"></circle><circle cx="12" cy="15" r="1.2" fill="currentColor"></circle></svg>',
-    crown: '<svg class="i crown viewBox="0 0 24 24" fill="currentColor"><path d="M3 7l4 4 5-6 5 6 4-4-2 12H5L3 7zm2 13h14v2H5v-2z"/></svg>',
+    crown: '<svg class="i crown" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" overflow="visible"><path d="M2 18.2h20V21H2v-2.8zM2 16.2L5.6 6.4l4.9 4.1L12 3l1.5 7.5 4.9-4.1L22 16.2H2z"/></svg>',
     shield: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>',
     settings: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>',
     refresh: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>',
@@ -2301,11 +2301,9 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
   function renderFiles() {
     var v = document.getElementById('view');
     v.innerHTML = '<div class="bar"><h2>' + t('my_files') + '</h2><div class="baract">' +
-      '<button class="btn small" id="newfolder">' + ICON.folder + ' ' + t('new_folder') + '</button>' +
-      '<button class="btn small" id="new">' + ICON.plus + ' ' + t('new_file') + '</button></div></div>' +
+      '<button class="btn small" id="newfolder">' + ICON.folder + ' ' + t('new_folder') + '</button></div></div>' +
       '<div class="grid" id="grid"></div>';
     var grid = document.getElementById('grid');
-    document.getElementById('new').onclick = function () { toast(t('open_folder_first'), true); };
     document.getElementById('newfolder').onclick = function () { openFolderModal(); };
     if (!state.files.length) { grid.innerHTML = emptyBox(ICON.file, t('no_files'), t('create_first')); return; }
     grid.innerHTML = state.files.map(fileCard).join('');
