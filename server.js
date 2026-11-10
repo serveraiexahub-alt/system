@@ -284,7 +284,22 @@ function rawKeyFor(f) {
   return f.rawKey;
 }
 
-function isPub(o) { return (o.visibility || 'public') === 'public'; }
+function isPub(o) {
+  if (!o) return true;
+  if (o.folder) {
+    const fo = ownGet(db.folders, o.folder);
+    if (fo) return (fo.visibility || 'public') === 'public';
+  }
+  return (o.visibility || 'public') === 'public';
+}
+
+function fileVis(f) {
+  if (f && f.folder) {
+    const fo = ownGet(db.folders, f.folder);
+    if (fo) return (fo.visibility || 'public') === 'public' ? 'public' : 'private';
+  }
+  return (f && f.visibility === 'private') ? 'private' : 'public';
+}
 function folderGuard(f, u) {
   if (!f.folder) return true;
   const fo = db.folders[f.folder];
@@ -1004,7 +1019,7 @@ app.get('/api/files', auth, function (req, res) {
         role: f.owner === u.id ? 'owner' : 'editor',
         ownerName: dispName(owner),
         folder: f.folder || null,
-        visibility: f.visibility || 'public',
+        visibility: fileVis(f),
         fav: isFav(u, 'file', f.id)
       };
     })
@@ -1032,8 +1047,13 @@ app.post('/api/files', auth, function (req, res) {
   if (code.length > lim) return res.status(413).json({ error: 'ไฟล์ใหญ่เกิน ' + Math.floor(lim / 1048576) + ' MB' + (isPremium(ownGet(db.users, req.user.id)) ? '' : ' (พรีเมียมได้ถึง 20 MB)') });
   const fid = id(8);
   const now = Date.now();
-  const folder = req.body.folder && ownGet(db.folders, String(req.body.folder)) ? String(req.body.folder) : null;
-  const vis = req.body.visibility === 'private' ? 'private' : 'public';
+  const folderRaw = String((req.body || {}).folder || '');
+  const folderObj = folderRaw ? ownGet(db.folders, folderRaw) : null;
+  if (!folderObj || folderObj.owner !== req.user.id) {
+    return res.status(400).json({ error: 'ต้องเลือกโฟลเดอร์ก่อนสร้างไฟล์' });
+  }
+  const folder = folderRaw;
+  const vis = 'public';
   const f = { id: fid, owner: req.user.id, name: name, code: code, created: now, updated: now, shares: [], invites: [], history: [], folder: folder, visibility: vis, rawKey: id(18) };
   if (folder) {
     const fo = db.folders[folder];
@@ -1049,7 +1069,7 @@ app.post('/api/files', auth, function (req, res) {
 app.get('/api/files/:id', auth, badKey, function (req, res) {
   const f = ownGet(db.files, req.params.id);
   if (!f || !canView(f, req.user)) return res.status(404).json({ error: 'File not found' });
-  res.json({ id: f.id, name: f.name, code: f.code, role: canDelete(f, req.user) ? 'owner' : 'editor', folder: f.folder || null, visibility: f.visibility || 'public', ownerName: dispName(db.users[f.owner]), fav: isFav(req.user, 'file', f.id) });
+  res.json({ id: f.id, name: f.name, code: f.code, role: canDelete(f, req.user) ? 'owner' : 'editor', folder: f.folder || null, visibility: fileVis(f), ownerName: dispName(db.users[f.owner]), fav: isFav(req.user, 'file', f.id) });
 });
 
 app.put('/api/files/:id', auth, badKey, function (req, res) {
@@ -1068,7 +1088,6 @@ app.put('/api/files/:id', auth, badKey, function (req, res) {
   f.code = code;
   f.updated = Date.now();
   if (canDelete(f, req.user)) {
-    if (req.body.visibility === 'private' || req.body.visibility === 'public') f.visibility = req.body.visibility;
     if (req.body.folder !== undefined) {
       const nf = req.body.folder && ownGet(db.folders, String(req.body.folder)) ? String(req.body.folder) : null;
       Object.values(db.folders).forEach(function (fo) {
@@ -1161,7 +1180,7 @@ function folderView(fo, req, u) {
   });
   const files = ids.map(function (fid) {
     const f = ownGet(db.files, fid);
-    return { id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public', ownerName: dispName(db.users[f.owner]), rawUrl: rawUrl(req, f.id), fav: isFav(u, 'file', f.id) };
+    return { id: f.id, name: f.name, updated: f.updated, visibility: fileVis(f), folder: f.folder || null, ownerName: dispName(db.users[f.owner]), rawUrl: rawUrl(req, f.id), fav: isFav(u, 'file', f.id) };
   }).sort(function (a, b) { return b.updated - a.updated; });
   let last = fo.updated || fo.created || 0;
   ids.forEach(function (fid) { if (ownGet(db.files, fid).updated > last) last = ownGet(db.files, fid).updated; });
@@ -1276,7 +1295,7 @@ app.get('/api/search', auth, function (req, res) {
     .slice(0, 40)
     .map(function (f) {
       return {
-        id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public',
+        id: f.id, name: f.name, updated: f.updated, visibility: fileVis(f),
         ownerName: dispName(db.users[f.owner]),
         rawUrl: rawUrl(req, f.id), fav: isFav(u, 'file', f.id),
         role: canDelete(f, u) ? 'owner' : ((f.shares || []).indexOf(u.id) >= 0 ? 'editor' : 'viewer'),
@@ -1301,7 +1320,7 @@ app.get('/api/users/:username', auth, function (req, res) {
     .filter(function (f) { return f.owner === target.id && canView(f, u); })
     .map(function (f) {
       return {
-        id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public',
+        id: f.id, name: f.name, updated: f.updated, visibility: fileVis(f),
         ownerName: dispName(target), rawUrl: rawUrl(req, f.id), fav: isFav(u, 'file', f.id),
         role: canDelete(f, u) ? 'owner' : ((f.shares || []).indexOf(u.id) >= 0 ? 'editor' : 'viewer'),
         folder: f.folder || null
@@ -1353,7 +1372,7 @@ app.get('/api/favorites', auth, function (req, res) {
     if (x.type === 'file') {
       const f = ownGet(db.files, x.id);
       if (f && canView(f, u)) out.files.push({
-        id: f.id, name: f.name, updated: f.updated, visibility: f.visibility || 'public',
+        id: f.id, name: f.name, updated: f.updated, visibility: fileVis(f),
         ownerName: dispName(db.users[f.owner]), rawUrl: rawUrl(req, f.id),
         fav: true, role: canDelete(f, u) ? 'owner' : 'editor'
       });
@@ -1622,6 +1641,11 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 .verifycode { font-family: ui-monospace, monospace; font-size: 22px; font-weight: 800; letter-spacing: 2px; background: var(--bg2); border: 1px dashed var(--line2); border-radius: 10px; padding: 16px; text-align: center; margin: 10px 0 12px; word-break: break-all; }
 .accrow { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; background: var(--bg2); border: 1px solid var(--line2); border-radius: 8px; margin-top: 8px; font-size: 13px; }
 .acclab { color: var(--muted); }
+.updbody { max-height: 60vh; overflow: auto; }
+.updbox { border: 1px solid var(--line2); border-radius: 10px; padding: 10px 12px; margin-bottom: 9px; background: var(--bg2); }
+.updhead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; font-size: 13px; }
+.upddate { color: var(--muted); font-size: 11px; }
+.updlist { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.7; }
 .verifywait { margin-top: 14px; color: var(--muted); font-size: 12px; text-align: center; }
 .crown { color: #f1c40f; width: 15px; height: 15px; vertical-align: -2px; margin-left: 4px; }
 .lvlbtn.locked { opacity: 0.55; }
@@ -1672,8 +1696,8 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     copy2: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>'
   };
   var T = {
-    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', captcha:'ยืนยันตัวตน', captcha_ph:'ใส่เลข 4 หลัก', captcha_hint:'พิมพ์เลขในรูป (ติดกัน)', verify_title:'ยืนยันบัญชีผ่าน Discord', verify_steps:'กดลิงก์เข้ากลุ่ม Discord → กดปุ่ม ยืนยันบัญชี → ใส่รหัสข้างบน → ระบบจะสมัครให้อัตโนมัติ', verify_join:'เข้ากลุ่ม Discord', verify_waiting:'รอการยืนยัน... (อย่าปิดหน้านี้)', verify_expired:'หมดเวลา — เริ่มสมัครใหม่', save_acc_title:'บันทึกบัญชีไหม?', save_acc_hint:'จำรหัสผ่านไว้ด้วย — ถ้าลืมจะเข้าสู่ระบบไม่ได้', save_acc_copy:'คัดลอก', save_acc_dl:'ดาวน์โหลด .txt', save_acc_file_title:'บัญชี สกัด HUB', save_acc_file_note:'เก็บไฟล์นี้ไว้ให้ดี อย่าให้ใครเห็น', obf:'ปกปิดโค้ด Lua', obf_title:'Lua Obfuscator', obf_input:'โค้ด Lua', obf_input_ph:'วางโค้ด Lua ที่นี่ หรือกดอัปโหลดไฟล์', obf_pick:'อัปโหลดไฟล์', obf_no_file:'ยังไม่ได้เลือกไฟล์', obf_run:'ปกปิด', obf_running:'กำลังปกปิด...', obf_output:'ผลลัพธ์', obf_copy:'คัดลอกผลลัพธ์', obf_save:'สร้างไฟล์จากผลลัพธ์', obf_name:'ชื่อไฟล์', obf_name_ph:'obfuscated', obf_options:'ตัวเลือก', obf_opt_rename:'เปลี่ยนชื่อตัวแปร', obf_opt_strings:'เข้ารหัสสตริง', obf_opt_numbers:'แปลงตัวเลข', obf_opt_junk:'ใส่โค้ดหลอก', obf_opt_wrap:'ห่อด้วย loader', obf_opt_hide:'ซ่อน error', obf_done:'ปกปิดเสร็จแล้ว', obf_empty:'ใส่โค้ดก่อน', obf_saved:'สร้างไฟล์แล้ว', obf_stats:'ผลลัพธ์', obf_strong:'โหมดแน่นหนา', obf_clear:'ล้าง', obf_level:'ระดับความยาก', obf_lv1:'1 · เบา', obf_lv2:'2 · กลาง', obf_lv3:'3 · หนัก', obf_lv4:'4 · โหด', obf_lv5:'5 · สุดโหด', obf_lv1_hint:'เร็วสุด ไฟล์เล็ก แต่แกะง่าย', obf_lv2_hint:'สมดุล ไฟล์กลางๆ', obf_lv3_hint:'แนะนำ — แกะยาก ไฟล์ใหญ่ขึ้น', obf_lv4_hint:'โหด 3 ชั้น + ขยะเยอะ (พรีเมียม)', obf_lv5_hint:'สุดโหด — แปลงเป็น bytecode VM (พรีเมียม)', obf_lv6_hint:'โหดสุด — VM + 3 ชั้น + ขยะ 40 เท่า (พรีเมียม · ไฟล์ใหญ่)', obf_remote:'เก็บตัวแปรไว้บนเว็บ', obf_remote_on:'เปิด (สคริปต์จะดึงค่าตอนรัน)', obf_edit:'แก้ไขไฟล์', obf_updated:'อัปเดตไฟล์แล้ว', obf_left:'เหลือ', obf_limit:'ใช้ครบ 5 ครั้ง/วันแล้ว', obf_copy_blocked:'โหมดเก็บตัวแปรบนเว็บ — คัดลอกไม่ได้ ต้องสร้างหรือแก้ไขไฟล์', obf_premium_lv:'ระดับ 4-6 ต้องใช้พรีเมียม 👑' },
-    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', captcha:'Verification', captcha_ph:'Enter 4 digits', captcha_hint:'Type the digits shown in the image', verify_title:'Verify via Discord', verify_steps:'Join the Discord → press the verify button → enter the code above → your account is created automatically', verify_join:'Join Discord', verify_waiting:'Waiting for verification... (keep this page open)', verify_expired:'Expired — start again', save_acc_title:'Save your account?', save_acc_hint:'Remember your password — you cannot log in without it', save_acc_copy:'Copy', save_acc_dl:'Download .txt', save_acc_file_title:'Sakad HUB account', save_acc_file_note:'Keep this file safe, do not share it', obf:'Protect Lua code', obf_title:'Lua Obfuscator', obf_input:'Lua code', obf_input_ph:'Paste Lua code here, or upload a file', obf_pick:'Upload file', obf_no_file:'No file selected', obf_run:'Protect', obf_running:'Protecting...', obf_output:'Output', obf_copy:'Copy output', obf_save:'Create file from output', obf_name:'File name', obf_name_ph:'obfuscated', obf_options:'Options', obf_opt_rename:'Rename variables', obf_opt_strings:'Encrypt strings', obf_opt_numbers:'Transform numbers', obf_opt_junk:'Insert decoy code', obf_opt_wrap:'Wrap in loader', obf_opt_hide:'Hide errors', obf_done:'Done', obf_empty:'Enter code first', obf_saved:'File created', obf_stats:'Result', obf_strong:'Strong mode', obf_clear:'Clear', obf_level:'Difficulty', obf_lv1:'1 · Light', obf_lv2:'2 · Medium', obf_lv3:'3 · Heavy', obf_lv4:'4 · Brutal', obf_lv5:'5 · Insane', obf_lv1_hint:'Fastest, smallest file, easy to crack', obf_lv2_hint:'Balanced, medium size', obf_lv3_hint:'Recommended — hard to crack', obf_lv4_hint:'Brutal: 3 layers + heavy junk', obf_lv5_hint:'Insane — compiles to a bytecode VM (no loadstring of your code)', obf_lv6_hint:'Max — VM + 3 pack layers + 40x junk (very large file)', obf_remote:'Remote variables', obf_remote_on:'Enable (script fetches values at runtime)', obf_edit:'Edit file', obf_updated:'File updated', obf_left:'Left', obf_limit:'Daily limit reached (5/day)', obf_copy_blocked:'Remote mode — copying disabled, use create or edit file', obf_premium_lv:'Levels 4-6 require premium 👑' }
+    th: { sub_login:'เข้าสู่ระบบบัญชีของคุณ', sub_signup:'สร้างบัญชีของคุณ', username:'ชื่อผู้ใช้', password:'รหัสผ่าน', login:'เข้าสู่ระบบ', signup:'สร้างบัญชี', have_account:'มีบัญชีแล้ว?', no_account:'ยังไม่มีบัญชี?', files:'ไฟล์', new_file:'สร้างไฟล์', edit_file:'แก้ไขไฟล์', create_file:'สร้างไฟล์ใหม่', file_name:'ชื่อไฟล์', code:'โค้ด', upload_file:'อัปโหลดไฟล์', choose_file:'เลือกไฟล์', no_file:'ยังไม่ได้เลือกไฟล์', cancel:'ยกเลิก', save:'บันทึก', create:'สร้าง', raw_hint:'ลิงก์ raw คงเดิมหลังแก้ไข เอาไปใส่ใน executor ได้เลย', shared:'แชร์', by:'โดย', options:'ตัวเลือก', info:'ข้อมูล', invite_others:'เชิญผู้ใช้คนอื่น', close:'ปิด', loading:'กำลังโหลด...', no_updates:'ยังไม่มีการอัปเดต', chars:'ตัวอักษร', lines:'บรรทัด', invite_user:'เชิญผู้ใช้', invite_hint:'ผู้ถูกเชิญจะดูและแก้ไฟล์ได้ แต่ลบไม่ได้', invite:'เชิญ', invited_sent:'ส่งคำเชิญแล้ว', invites:'คำเชิญ', no_invites:'ไม่มีคำเชิญ', from:'จาก', no_files:'ยังไม่มีไฟล์', create_first:'สร้าง script แรกของคุณ', signout:'ออกบัญชี', account:'บัญชี', language:'เปลี่ยนภาษา', discord:'ดิสคอร์ด', edit:'แก้ไข', delete:'ลบ', copy:'คัดลอก', ago_sec:'วินาทีที่แล้ว', ago_min:'นาทีที่แล้ว', ago_hour:'ชั่วโมงที่แล้ว', ago_day:'วันที่แล้ว', nav_files:'ไฟล์', nav_search:'ค้นหา', nav_folders:'โฟลเดอร์', nav_fav:'รายการโปรด', search_ph:'ค้นหาผู้ใช้ / ไฟล์ / โฟลเดอร์', search_hint:'พิมพ์อย่างน้อย 1 ตัวอักษร', res_users:'ผู้ใช้', res_files:'ไฟล์', res_folders:'โฟลเดอร์', follow:'ติดตาม', following:'ติดตามอยู่', unfollow:'เลิกติดตาม', followers:'ผู้ติดตาม', following_n:'กำลังติดตาม', add_fav:'เพิ่มรายการโปรด', rm_fav:'เอาออกจากรายการโปรด', new_folder:'สร้างโฟลเดอร์', folder_name:'ชื่อโฟลเดอร์', no_folders:'ยังไม่มีโฟลเดอร์', no_fav:'ยังไม่มีรายการโปรด', public:'สาธารณะ', private:'ส่วนตัว', vis_public:'ให้คนอื่นเห็น', vis_private:'เห็นคนเดียว', pick_files:'เลือกไฟล์ในโฟลเดอร์', select_files:'เลือกไฟล์', save_folder:'บันทึกโฟลเดอร์', empty_folder:'โฟลเดอร์ว่าง', files_n:'ไฟล์', my_files:'ไฟล์ของฉัน', open:'เปิด', none:'ไม่มี', view_profile:'ดูโปรไฟล์', folder_created:'สร้างโฟลเดอร์แล้ว', add_to_folder:'โฟลเดอร์', move:'ย้าย', no_folder:'ไม่ใส่โฟลเดอร์', updated_at:'อัปเดตล่าสุด', visibility:'การมองเห็น', edit_profile:'แก้ไขโปรไฟล์', nickname:'ชื่อเล่น', change_photo:'เปลี่ยนรูป', remove_photo:'ลบรูป', profile_saved:'บันทึกโปรไฟล์แล้ว', saved:'บันทึกแล้ว', confirm_title:'ยืนยัน', yes:'ใช่', no:'ไม่', choose:'เลือก', delete_confirm:'ลบอันนี้?', folder_here:'โฟลเดอร์', pick_placeholder:'เลือก…', followers_t:'ผู้ติดตาม', following_t:'กำลังติดตาม', toggle_vis:'การมองเห็น', public_hint:'คนอื่นค้นหาเจอ', private_hint:'เห็นคนเดียว', updates:'อัปเดต', folder_required:'โฟลเดอร์ (จำเป็น)', folder_vis_hint:'การมองเห็นปรับที่โฟลเดอร์เท่านั้น', folder_required_toast:'ต้องเลือกโฟลเดอร์ก่อนสร้างไฟล์', captcha:'ยืนยันตัวตน', captcha_ph:'ใส่เลข 4 หลัก', captcha_hint:'พิมพ์เลขในรูป (ติดกัน)', verify_title:'ยืนยันบัญชีผ่าน Discord', verify_steps:'กดลิงก์เข้ากลุ่ม Discord → กดปุ่ม ยืนยันบัญชี → ใส่รหัสข้างบน → ระบบจะสมัครให้อัตโนมัติ', verify_join:'เข้ากลุ่ม Discord', verify_waiting:'รอการยืนยัน... (อย่าปิดหน้านี้)', verify_expired:'หมดเวลา — เริ่มสมัครใหม่', save_acc_title:'บันทึกบัญชีไหม?', save_acc_hint:'จำรหัสผ่านไว้ด้วย — ถ้าลืมจะเข้าสู่ระบบไม่ได้', save_acc_copy:'คัดลอก', save_acc_dl:'ดาวน์โหลด .txt', save_acc_file_title:'บัญชี สกัด HUB', save_acc_file_note:'เก็บไฟล์นี้ไว้ให้ดี อย่าให้ใครเห็น', obf:'ปกปิดโค้ด Lua', obf_title:'Lua Obfuscator', obf_input:'โค้ด Lua', obf_input_ph:'วางโค้ด Lua ที่นี่ หรือกดอัปโหลดไฟล์', obf_pick:'อัปโหลดไฟล์', obf_no_file:'ยังไม่ได้เลือกไฟล์', obf_run:'ปกปิด', obf_running:'กำลังปกปิด...', obf_output:'ผลลัพธ์', obf_copy:'คัดลอกผลลัพธ์', obf_save:'สร้างไฟล์จากผลลัพธ์', obf_name:'ชื่อไฟล์', obf_name_ph:'obfuscated', obf_options:'ตัวเลือก', obf_opt_rename:'เปลี่ยนชื่อตัวแปร', obf_opt_strings:'เข้ารหัสสตริง', obf_opt_numbers:'แปลงตัวเลข', obf_opt_junk:'ใส่โค้ดหลอก', obf_opt_wrap:'ห่อด้วย loader', obf_opt_hide:'ซ่อน error', obf_done:'ปกปิดเสร็จแล้ว', obf_empty:'ใส่โค้ดก่อน', obf_saved:'สร้างไฟล์แล้ว', obf_stats:'ผลลัพธ์', obf_strong:'โหมดแน่นหนา', obf_clear:'ล้าง', obf_level:'ระดับความยาก', obf_lv1:'1 · เบา', obf_lv2:'2 · กลาง', obf_lv3:'3 · หนัก', obf_lv4:'4 · โหด', obf_lv5:'5 · สุดโหด', obf_lv1_hint:'เร็วสุด ไฟล์เล็ก แต่แกะง่าย', obf_lv2_hint:'สมดุล ไฟล์กลางๆ', obf_lv3_hint:'แนะนำ — แกะยาก ไฟล์ใหญ่ขึ้น', obf_lv4_hint:'โหด 3 ชั้น + ขยะเยอะ (พรีเมียม)', obf_lv5_hint:'สุดโหด — แปลงเป็น bytecode VM (พรีเมียม)', obf_lv6_hint:'โหดสุด — VM + 3 ชั้น + ขยะ 40 เท่า (พรีเมียม · ไฟล์ใหญ่)', obf_remote:'เก็บตัวแปรไว้บนเว็บ', obf_remote_on:'เปิด (สคริปต์จะดึงค่าตอนรัน)', obf_edit:'แก้ไขไฟล์', obf_updated:'อัปเดตไฟล์แล้ว', obf_left:'เหลือ', obf_limit:'ใช้ครบ 5 ครั้ง/วันแล้ว', obf_copy_blocked:'โหมดเก็บตัวแปรบนเว็บ — คัดลอกไม่ได้ ต้องสร้างหรือแก้ไขไฟล์', obf_premium_lv:'ระดับ 4-6 ต้องใช้พรีเมียม 👑' },
+    en: { sub_login:'Sign in to your account', sub_signup:'Create your account', username:'Username', password:'Password', login:'Sign in', signup:'Create account', have_account:'Already have an account?', no_account:'No account?', files:'Files', new_file:'New file', edit_file:'Edit file', create_file:'New file', file_name:'File name', code:'Code', upload_file:'Upload file', choose_file:'Choose file', no_file:'No file selected', cancel:'Cancel', save:'Save', create:'Create', raw_hint:'The raw link stays the same after editing. Paste it into your executor.', shared:'Shared', by:'by', options:'Options', info:'Info', invite_others:'Invite others', close:'Close', loading:'Loading...', no_updates:'No updates yet', chars:'chars', lines:'lines', invite_user:'Invite user', invite_hint:'Invited users can view and edit the file, but cannot delete it', invite:'Invite', invited_sent:'Invitation sent', invites:'Invites', no_invites:'No invitations', from:'from', no_files:'No files yet', create_first:'Create your first script', signout:'Sign out', account:'Account', language:'Language', discord:'Discord', edit:'Edit', delete:'Delete', copy:'Copy', ago_sec:'s ago', ago_min:'m ago', ago_hour:'h ago', ago_day:'d ago', nav_files:'Files', nav_search:'Find', nav_folders:'Folders', nav_fav:'Favorites', search_ph:'Search users / files / folders', search_hint:'Type at least 1 character', res_users:'Users', res_files:'Files', res_folders:'Folders', follow:'Follow', following:'Following', unfollow:'Unfollow', followers:'followers', following_n:'following', add_fav:'Favorite', rm_fav:'Unfavorite', new_folder:'New folder', folder_name:'Folder name', no_folders:'No folders yet', no_fav:'No favorites yet', public:'Public', private:'Only me', vis_public:'Visible to others', vis_private:'Only me', pick_files:'Files in folder', select_files:'Select files', save_folder:'Save folder', empty_folder:'Folder is empty', files_n:'files', my_files:'My files', open:'Open', none:'none', view_profile:'View profile', folder_created:'Folder created', add_to_folder:'Folder', move:'Move', no_folder:'No folder', updated_at:'Last updated', visibility:'Visibility', edit_profile:'Edit profile', nickname:'Nickname', change_photo:'Change photo', remove_photo:'Remove photo', profile_saved:'Profile saved', saved:'Saved', confirm_title:'Confirm', yes:'Yes', no:'No', choose:'Choose', delete_confirm:'Delete this?', folder_here:'Folder', pick_placeholder:'Select…', followers_t:'followers', following_t:'following', toggle_vis:'Visibility', public_hint:'Anyone can find it', private_hint:'Only you can see it', updates:'Updates', folder_required:'Folder (required)', folder_vis_hint:'Visibility is set on the folder', folder_required_toast:'Pick a folder before creating a file', captcha:'Verification', captcha_ph:'Enter 4 digits', captcha_hint:'Type the digits shown in the image', verify_title:'Verify via Discord', verify_steps:'Join the Discord → press the verify button → enter the code above → your account is created automatically', verify_join:'Join Discord', verify_waiting:'Waiting for verification... (keep this page open)', verify_expired:'Expired — start again', save_acc_title:'Save your account?', save_acc_hint:'Remember your password — you cannot log in without it', save_acc_copy:'Copy', save_acc_dl:'Download .txt', save_acc_file_title:'Sakad HUB account', save_acc_file_note:'Keep this file safe, do not share it', obf:'Protect Lua code', obf_title:'Lua Obfuscator', obf_input:'Lua code', obf_input_ph:'Paste Lua code here, or upload a file', obf_pick:'Upload file', obf_no_file:'No file selected', obf_run:'Protect', obf_running:'Protecting...', obf_output:'Output', obf_copy:'Copy output', obf_save:'Create file from output', obf_name:'File name', obf_name_ph:'obfuscated', obf_options:'Options', obf_opt_rename:'Rename variables', obf_opt_strings:'Encrypt strings', obf_opt_numbers:'Transform numbers', obf_opt_junk:'Insert decoy code', obf_opt_wrap:'Wrap in loader', obf_opt_hide:'Hide errors', obf_done:'Done', obf_empty:'Enter code first', obf_saved:'File created', obf_stats:'Result', obf_strong:'Strong mode', obf_clear:'Clear', obf_level:'Difficulty', obf_lv1:'1 · Light', obf_lv2:'2 · Medium', obf_lv3:'3 · Heavy', obf_lv4:'4 · Brutal', obf_lv5:'5 · Insane', obf_lv1_hint:'Fastest, smallest file, easy to crack', obf_lv2_hint:'Balanced, medium size', obf_lv3_hint:'Recommended — hard to crack', obf_lv4_hint:'Brutal: 3 layers + heavy junk', obf_lv5_hint:'Insane — compiles to a bytecode VM (no loadstring of your code)', obf_lv6_hint:'Max — VM + 3 pack layers + 40x junk (very large file)', obf_remote:'Remote variables', obf_remote_on:'Enable (script fetches values at runtime)', obf_edit:'Edit file', obf_updated:'File updated', obf_left:'Left', obf_limit:'Daily limit reached (5/day)', obf_copy_blocked:'Remote mode — copying disabled, use create or edit file', obf_premium_lv:'Levels 4-6 require premium 👑' }
   };
   var LANG = localStorage.getItem('lang') || 'th';
   function t(k) { var d = T[LANG] || T.th; return d[k] != null ? d[k] : (T.th[k] != null ? T.th[k] : k); }
@@ -2156,7 +2180,6 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<button class="btn ghost" id="m-info">' + ICON.info + ' ' + t('info') + '</button>' +
       '<button class="btn ghost" id="m-fav">' + (f.fav ? ICON.starfill : ICON.star) + ' ' + (f.fav ? t('rm_fav') : t('add_fav')) + '</button>' +
       (owner ? '<button class="btn ghost" id="m-invite">' + ICON.userplus + ' ' + t('invite_others') + '</button>' : '') +
-      (owner ? '<button class="btn ghost" id="m-vis">' + (f.visibility === 'private' ? ICON.eyeoff : ICON.eye) + ' ' + t('toggle_vis') + ': ' + (f.visibility === 'private' ? t('vis_private') : t('vis_public')) + '</button>' : '') +
       (owner ? '<button class="btn ghost" id="m-move">' + ICON.folder + ' ' + t('add_to_folder') + '</button>' : '') +
       (owner ? '<button class="btn ghost" id="m-del">' + ICON.trash + ' ' + t('delete') + '</button>' : '') +
       '</div><div class="foot"><button class="btn ghost" id="m-close">' + t('close') + '</button></div></div>';
@@ -2167,10 +2190,6 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       api('/api/favorites', { method: 'POST', body: { type: 'file', id: f.id } }).then(function () { overlay.remove(); loadFavorites(); loadFiles(); }).catch(function (e) { toast(e.message, true); });
     };
     if (overlay.querySelector('#m-invite')) overlay.querySelector('#m-invite').onclick = function () { overlay.remove(); openInvite(f.id); };
-    if (overlay.querySelector('#m-vis')) overlay.querySelector('#m-vis').onclick = function () {
-      var nv = f.visibility === 'private' ? 'public' : 'private';
-      api('/api/files/' + f.id, { method: 'PUT', body: { visibility: nv } }).then(function () { overlay.remove(); loadFiles(); toast(t('saved')); }).catch(function (e) { toast(e.message, true); });
-    };
     if (overlay.querySelector('#m-move')) overlay.querySelector('#m-move').onclick = function () { overlay.remove(); openMove(f); };
     if (overlay.querySelector('#m-del')) overlay.querySelector('#m-del').onclick = function () {
       overlay.remove();
@@ -2234,7 +2253,6 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     var editing = !!fo;
     var sel = [];
     if (editing && fo.files) fo.files.forEach(function (f) { sel.push(f.id); });
-    var visOpts = [{ value: 'public', label: t('vis_public'), icon: ICON.eye }, { value: 'private', label: t('vis_private'), icon: ICON.eyeoff }];
     var overlay = document.createElement('div'); overlay.className = 'overlay';
     overlay.innerHTML = '<div class="modal"><h3>' + (editing ? ICON.edit + ' ' + t('pick_files') : ICON.folder + ' ' + t('new_folder')) + '</h3><div class="body">' +
       '<div class="field"><label>' + ICON.folder + ' ' + t('folder_name') + '</label><input class="input" id="foname" placeholder="myfolder" spellcheck="false" value="' + (editing ? esc(fo.name) : '') + '"></div>' +
@@ -2274,8 +2292,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<h3>' + (editing ? ICON.edit + ' ' + t('edit_file') : ICON.plus + ' ' + t('create_file')) + '</h3>' +
       '<div class="body">' +
       '<div class="field"><label>' + ICON.file + ' ' + t('file_name') + '</label><input class="input" id="fname" placeholder="myscript" spellcheck="false"></div>' +
-      '<div class="field"><label>' + ICON.eye + ' ' + t('visibility') + '</label>' + picker('fvispick', visOpts, 'public', t('pick_placeholder')) + '</div>' +
-      '<div class="field"><label>' + ICON.folder + ' ' + t('add_to_folder') + '</label>' + picker('ffolderpick', [{ value: '', label: t('no_folder') }], '', t('no_folder')) + '</div>' +
+      '<div class="field"><label>' + ICON.folder + ' ' + t('folder_required') + '</label>' + picker('ffolderpick', [{ value: '', label: t('pick_placeholder') }], '', t('pick_placeholder')) + '<div class="hint">' + t('folder_vis_hint') + '</div></div>' +
       '<div class="field"><label>' + ICON.code + ' ' + t('code') + '</label><textarea class="input" id="fcode" placeholder="print(&quot;hello&quot;)"></textarea></div>' +
       '<div class="field"><label>' + ICON.file + ' ' + t('upload_file') + '</label>' +
       '<button class="btn ghost uploadbtn" id="fpick" type="button">' + ICON.file + ' ' + t('choose_file') + '</button>' +
@@ -2285,9 +2302,8 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<div class="foot"><button class="btn ghost" id="cancel">' + t('cancel') + '</button><button class="btn" id="save">' + (editing ? t('save') : t('create')) + '</button></div></div>';
     document.body.appendChild(overlay);
     var nameEl = overlay.querySelector('#fname'), codeEl = overlay.querySelector('#fcode');
-    bindPicker(overlay, 'fvispick');
     bindPicker(overlay, 'ffolderpick');
-    var foOpts = [{ value: '', label: t('no_folder') }];
+    var foOpts = [];
     state.folders.filter(function (x) { return x.role === 'owner'; }).forEach(function (fo) { foOpts.push({ value: fo.id, label: fo.name, icon: ICON.folder }); });
     var fw = overlay.querySelector('#ffolderpick .pklist');
     if (fw) {
@@ -2306,15 +2322,15 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     });
     if (editing) api('/api/files/' + id).then(function (d) {
       nameEl.value = d.name; codeEl.value = d.code;
-      var vl = overlay.querySelector('#fvispick .pklist');
-      if (vl) { vl.setAttribute('data-val', d.visibility || 'public'); var lbl = overlay.querySelector('#fvispick .pklabel'); if (lbl) lbl.textContent = d.visibility === 'private' ? t('vis_private') : t('vis_public'); }
       var fl = overlay.querySelector('#ffolderpick .pklist');
       if (fl) { fl.setAttribute('data-val', d.folder || ''); var lb2 = overlay.querySelector('#ffolderpick .pklabel'); if (lb2) { var found = foOpts.filter(function (o) { return o.value === (d.folder || ''); })[0]; lb2.textContent = found ? found.label : t('no_folder'); } }
     }).catch(function (e) { toast(e.message, true); overlay.remove(); });
     else nameEl.focus();
     overlay.querySelector('#cancel').onclick = function () { overlay.remove(); };
     overlay.querySelector('#save').onclick = function () {
-      var body = { name: nameEl.value.trim(), code: codeEl.value, visibility: pickerVal(overlay, 'fvispick') || 'public', folder: pickerVal(overlay, 'ffolderpick') || null };
+      var folderId = pickerVal(overlay, 'ffolderpick') || '';
+      if (!folderId) { toast(t('folder_required_toast'), true); return; }
+      var body = { name: nameEl.value.trim(), code: codeEl.value, folder: folderId };
       api(editing ? '/api/files/' + id : '/api/files', { method: editing ? 'PUT' : 'POST', body: body })
         .then(function () { overlay.remove(); loadFiles(); loadFolders(); toast(t('saved')); })
         .catch(function (e) { toast(e.message, true); });
@@ -2415,6 +2431,54 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     }
     return '<svg viewBox="0 0 20 14" width="17" height="12" style="flex:0 0 auto">' + bars + '</svg>';
   }
+  var CHANGELOG = [
+    {
+      v: 'v1.8', date: '10 พ.ย. 2026',
+      items: [
+        'เพิ่มความหนาของระบบปกปิดโค้ดอีกระดับ',
+        'เพิ่มระบบตรวจสอบความถูกต้องของไฟล์',
+        'ปรับราคาและสิทธิ์พรีเมียม'
+      ]
+    },
+    {
+      v: 'v1.7', date: '9 พ.ย. 2026',
+      items: [
+        'เพิ่มระดับปกปิดโค้ดสูงสุด (เฉพาะพรีเมียม)',
+        'ปรับระบบความปลอดภัยของเว็บ',
+        'เพิ่มระบบสำรองข้อมูลผ่าน Discord'
+      ]
+    },
+    {
+      v: 'v1.6', date: '8 พ.ย. 2026',
+      items: [
+        'เพิ่มระบบพรีเมียมและห้องสมัคร',
+        'เพิ่มการแจ้งเตือนเมื่อมีสมาชิกใหม่'
+      ]
+    },
+    {
+      v: 'v1.5', date: '7 พ.ย. 2026',
+      items: [
+        'เพิ่มระบบปกปิดโค้ดแบบใหม่',
+        'ปรับความเร็วของระบบ'
+      ]
+    }
+  ];
+
+  function openUpdates() {
+    var overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    var rows = CHANGELOG.map(function (c) {
+      return '<div class="updbox"><div class="updhead"><b>' + esc(c.v) + '</b><span class="upddate">' + esc(c.date) + '</span></div>' +
+        '<ul class="updlist">' + c.items.map(function (i) { return '<li>' + esc(i) + '</li>'; }).join('') + '</ul></div>';
+    }).join('');
+    overlay.innerHTML = '<div class="modal"><h3>' + ICON.info + ' ' + t('updates') + '</h3>' +
+      '<div class="body updbody">' + rows + '</div>' +
+      '<div class="foot"><button class="btn ghost" id="updclose">' + t('close') + '</button></div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('#updclose').onclick = function () { overlay.remove(); };
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+  }
+
   function openObfuscator() {
     var overlay = document.createElement('div'); overlay.className = 'overlay';
     overlay.innerHTML = '<div class="modal"><h3>' + ICON.lock + ' ' + t('obf_title') + '</h3><div class="body">' +
@@ -2671,6 +2735,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       '<button class="ditem" id="d-prof">' + ICON.user + ' ' + t('view_profile') + '</button>' +
       '<button class="ditem" id="d-edit">' + ICON.edit + ' ' + t('edit_profile') + '</button>' +
       '<button class="ditem" id="d-obf">' + ICON.code + ' ' + t('obf') + '</button>' +
+      '<button class="ditem" id="d-update">' + ICON.info + ' ' + t('updates') + '</button>' +
       '<button class="ditem" id="d-fav">' + ICON.star + ' ' + t('nav_fav') + '</button>' +
       '<button class="ditem" id="d-fol">' + ICON.userplus + ' ' + t('following_t') + '</button>' +
       '<button class="ditem" id="d-inv">' + ICON.userplus + ' ' + t('invites') + '<span class="dbadge" id="dbadge">' + state.invites.length + '</span></button>' +
@@ -2686,6 +2751,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     overlay.querySelector('#d-prof').onclick = function () { overlay.remove(); openProfile(state.user.username); };
     overlay.querySelector('#d-edit').onclick = function () { overlay.remove(); openEditProfile(); };
     overlay.querySelector('#d-obf').onclick = function () { overlay.remove(); openObfuscator(); };
+    overlay.querySelector('#d-update').onclick = function () { overlay.remove(); openUpdates(); };
     overlay.querySelector('#d-fav').onclick = function () { overlay.remove(); renderFavModal(); };
     overlay.querySelector('#d-fol').onclick = function () { overlay.remove(); openFollowing(); };
     overlay.querySelector('#d-inv').onclick = function () { overlay.remove(); openInvites(); };
