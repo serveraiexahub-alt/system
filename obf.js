@@ -943,6 +943,8 @@ function schemeA(src, rnd, hideErrors, rid) {
   p.push(nm.OUT + '[' + nm.ORD + '[' + nm.C + ']]=table.concat(' + nm.N + ') end');
   p.push('local ' + nm.S + '=table.concat(' + nm.OUT + ')');
   p.push('if #' + nm.S + '~=' + numLit(ch.n, rnd) + ' then return end');
+  const hcA = hashCheckLines(nm, src);
+  p.push(hcA[0]); p.push(hcA[1]);
   p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV');
   p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
   wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
@@ -974,6 +976,8 @@ function schemeB(src, rnd, hideErrors, rid) {
   p.push('end');
   p.push('local ' + nm.S + '=table.concat(' + nm.Q + ')');
   p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' then return end');
+  const hcB = hashCheckLines(nm, src);
+  p.push(hcB[0]); p.push(hcB[1]);
   p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV');
   p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
   wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
@@ -1000,6 +1004,8 @@ function schemeC(src, rnd, hideErrors, rid) {
   p.push('end');
   p.push('local ' + nm.S + '=table.concat(' + nm.Q + ')');
   p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' and #' + nm.S + '~=' + numLit(n + 1, rnd) + ' then return end');
+  const hcC = hashCheckLines(nm, src);
+  p.push(hcC[0]); p.push(hcC[1]);
   p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV');
   p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
   wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
@@ -1078,9 +1084,11 @@ function schemeD(src, rnd, hideErrors, rid) {
     branch.push('elseif ' + nm.T + '==' + blockIds[bi] + ' then ' + L.join(' '));
   });
 
+  const hcD = hashCheckLines(nm, src);
+  const hashLua = 'local hh=0 for _i=1,#' + nm.S + ' do hh=(hh*31+string.byte(' + nm.S + ',_i))%65521 end ';
   branch.push('elseif ' + nm.T + '==' + endId + ' then ' +
     'for ' + nm.I + '=1,' + blocks.length + ' do ' + nm.S + '=' + nm.S + '..(' + nm.OUT + '[' + nm.I + '] or "") end ' +
-    'if #' + nm.S + '~=' + numLit(n, rnd) + ' then ' + nm.T + '=0 else ' +
+    hashLua + 'if hh~=' + luaHash(src) + ' then ' + nm.T + '=0 elseif #' + nm.S + '~=' + numLit(n, rnd) + ' then ' + nm.T + '=0 else ' +
     'local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV ' +
     nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)] ' +
     'local ' + nm.RES + '=' + nm.LD + '(' + nm.S + ') if not ' + nm.RES + ' then ' + nm.T + '=0 else ' +
@@ -1295,7 +1303,27 @@ function packBlob(src, rnd, hideErrors, rid, avoid, forceIdx) {
     let guard = 0;
     while (idx === avoid && guard++ < 12) idx = Math.floor(rnd() * SCHEMES.length);
   }
-  return { code: SCHEMES[idx](src, rnd, hideErrors, rid), scheme: idx };
+  const saltLen = 8 + Math.floor(rnd() * 24);
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let salt = '';
+  for (let i = 0; i < saltLen; i++) salt += chars[Math.floor(rnd() * chars.length)];
+  const salted = '--' + salt + '\n' + src;
+  return { code: SCHEMES[idx](salted, rnd, hideErrors, rid), scheme: idx };
+}
+
+
+function luaHash(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + (str.charCodeAt(i) & 255)) % 65521;
+  return h;
+}
+
+function hashCheckLines(nm, src) {
+  const expect = luaHash(src);
+  return [
+    'local ' + nm.Q + '_h=0 for ' + nm.I + '=1,#' + nm.S + ' do ' + nm.Q + '_h=(' + nm.Q + '_h*31+string.byte(' + nm.S + ',' + nm.I + '))%65521 end',
+    'if ' + nm.Q + '_h~=' + expect + ' then return end'
+  ];
 }
 
 const { parseLua, buildVM } = require('./vm.js');
