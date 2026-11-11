@@ -1,5 +1,5 @@
 'use strict';
-const T = {"Local": 1, "LocalFunc": 2, "Set": 3, "FuncDecl": 4, "CallStat": 5, "If": 6, "While": 7, "Repeat": 8, "NumFor": 9, "GenFor": 10, "Do": 11, "Return": 12, "Break": 13, "Num": 14, "Str": 15, "Nil": 16, "True": 17, "False": 18, "Vararg": 19, "Name": 20, "Index": 21, "Bin": 22, "Un": 23, "Table": 24, "Func": 25, "Call": 26, "Invoke": 27};
+const T = {"Local": 1, "LocalFunc": 2, "Set": 3, "FuncDecl": 4, "CallStat": 5, "If": 6, "While": 7, "Repeat": 8, "NumFor": 9, "GenFor": 10, "Do": 11, "Return": 12, "Break": 13, "Continue": 28, "Num": 14, "Str": 15, "Nil": 16, "True": 17, "False": 18, "Vararg": 19, "Name": 20, "Index": 21, "Bin": 22, "Un": 23, "Table": 24, "Func": 25, "Call": 26, "Invoke": 27};
 // Lua 5.1/Luau subset parser -> compact AST
 function parseLua(tokens) {
   let i = 0;
@@ -24,10 +24,24 @@ function parseLua(tokens) {
     return body;
   }
 
+  function skipType() {
+    let depth = 0;
+    for (;;) {
+      const t = peek();
+      if (!t) return;
+      if (depth === 0 && (t.t === 'op' && (t.v === '=' || t.v === ',' || t.v === ')'))) return;
+      if (depth === 0 && t.t === 'kw' && /^(local|if|for|while|do|return|end|repeat|function|break|continue|else|elseif|until)$/.test(t.v)) return;
+      if (t.t === 'op' && (t.v === '{' || t.v === '(' || t.v === '[')) depth++;
+      if (t.t === 'op' && (t.v === '}' || t.v === ')' || t.v === ']')) { if (depth === 0) return; depth--; }
+      i++;
+    }
+  }
+
   function parseStatement() {
     const t = peek();
     if (!t) return null;
     if (t.t === 'op' && t.v === ';') { i++; return null; }
+    if (t.t === 'op' && t.v === '::') { i++; if (peek()) i++; if (isOp('::')) i++; return null; }
     if (t.t === 'kw') {
       switch (t.v) {
         case 'local': {
@@ -39,7 +53,8 @@ function parseLua(tokens) {
             return [T.LocalFunc, name, fn];
           }
           const names = [next().v];
-          while (optOp(',')) names.push(next().v);
+          if (optOp(':')) skipType();
+          while (optOp(',')) { names.push(next().v); if (optOp(':')) skipType(); }
           let exprs = [];
           if (optOp('=')) exprs = parseExprList();
           return [T.Local, names, exprs];
@@ -124,15 +139,25 @@ function parseLua(tokens) {
           return [T.Return, exprs];
         }
         case 'break': { i++; return [T.Break]; }
-        case 'goto': { i++; return null; }
+        case 'continue': { i++; return [T.Continue]; }
+        case 'goto': { i++; if (peek()) i++; return null; }
         default: break;
       }
     }
     return parseExprStatement();
   }
 
+  const COMPOUND = { '+=': '+', '-=': '-', '*=': '*', '/=': '/', '//=': '//', '%=': '%', '^=': '^', '..=': '..' };
+
   function parseExprStatement() {
     const expr = parseSuffixed();
+    const ct = peek();
+    if (ct && ct.t === 'op' && COMPOUND[ct.v]) {
+      const op = COMPOUND[ct.v];
+      i++;
+      const value = parseExpr();
+      return [T.Set, [toLHS(expr)], [[T.Bin, op, expr, value]]];
+    }
     if (isOp('=') || isOp(',')) {
       const targets = [toLHS(expr)];
       while (optOp(',')) targets.push(toLHS(parseSuffixed()));
@@ -159,12 +184,14 @@ function parseLua(tokens) {
   const BIN = {
     'or': [1, 1], 'and': [2, 2],
     '<': [3, 3], '>': [3, 3], '<=': [3, 3], '>=': [3, 3], '~=': [3, 3], '==': [3, 3],
-    '..': [5, 4],
-    '+': [6, 6], '-': [6, 6],
-    '*': [7, 7], '/': [7, 7], '%': [7, 7],
-    '^': [10, 9]
+    '|': [4, 4], '~': [5, 5], '&': [6, 6],
+    '<<': [7, 7], '>>': [7, 7],
+    '..': [9, 8],
+    '+': [10, 10], '-': [10, 10],
+    '*': [11, 11], '/': [11, 11], '//': [11, 11], '%': [11, 11],
+    '^': [14, 13]
   };
-  const UNARY = { 'not': 8, '-': 8, '#': 8 };
+  const UNARY = { 'not': 12, '-': 12, '#': 12, '~': 12 };
 
   function parseExpr(limit) {
     limit = limit === undefined ? 0 : limit;
@@ -207,6 +234,15 @@ function parseLua(tokens) {
       if (t.v === 'true') { i++; return [T.True]; }
       if (t.v === 'false') { i++; return [T.False]; }
       if (t.v === 'function') { i++; return parseFuncBody(); }
+      if (t.v === 'if') {
+        i++;
+        const cond = parseExpr();
+        eatKw('then');
+        const a = parseExpr();
+        eatKw('else');
+        const b = parseExpr();
+        return [T.Bin, 'and', cond, a];
+      }
       throw new Error('unexpected keyword ' + t.v);
     }
     if (t.t === 'op') {
@@ -279,9 +315,11 @@ function parseLua(tokens) {
     while (!isOp(')')) {
       if (isOp('...')) { i++; vararg = true; break; }
       params.push(next().v);
+      if (optOp(':')) skipType();
       if (!optOp(',')) break;
     }
     eatOp(')');
+    if (optOp(':')) skipType();
     const body = parseBlock(['end']);
     eatKw('end');
     return [T.Func, params, vararg, body];
@@ -337,6 +375,42 @@ local _find = string.find
 local _fmt = string.format
 local _concat = table.concat
 local _floor = math.floor
+local function _band(a, b)
+  local r, bit = 0, 1
+  a, b = _floor(a) % 4294967296, _floor(b) % 4294967296
+  for _ = 1, 32 do
+    local x, y = a % 2, b % 2
+    if x == 1 and y == 1 then r = r + bit end
+    a, b, bit = (a - x) / 2, (b - y) / 2, bit * 2
+  end
+  return r
+end
+local function _bor(a, b)
+  local r, bit = 0, 1
+  a, b = _floor(a) % 4294967296, _floor(b) % 4294967296
+  for _ = 1, 32 do
+    local x, y = a % 2, b % 2
+    if x == 1 or y == 1 then r = r + bit end
+    a, b, bit = (a - x) / 2, (b - y) / 2, bit * 2
+  end
+  return r
+end
+local function _bxor(a, b)
+  local r, bit = 0, 1
+  a, b = _floor(a) % 4294967296, _floor(b) % 4294967296
+  for _ = 1, 32 do
+    local x, y = a % 2, b % 2
+    if x ~= y then r = r + bit end
+    a, b, bit = (a - x) / 2, (b - y) / 2, bit * 2
+  end
+  return r
+end
+local function _shl(a, b)
+  return (_floor(a) * (2 ^ _floor(b))) % 4294967296
+end
+local function _shr(a, b)
+  return _floor(_floor(a) / (2 ^ _floor(b)))
+end
 local _insert = table.insert
 local _rawget = rawget
 local _rawequal = rawequal
@@ -365,6 +439,7 @@ local __U = _U
 local __G = _G
 local function __pack(...) return {n = _sel('#', ...), ...} end
 local function __str(n)
+  if _type(n) == "string" then return n end
   local c = n[4]
   if c then return c end
   local b, k = n[3], n[2]
@@ -418,7 +493,7 @@ __evalMulti = function(e, env)
     return __pack(f(__U(args, 1, args.n)))
   elseif t == 27 then
     local obj = __eval(e[2], env)
-    local f = obj[e[3]]
+    local f = obj[__str(e[3])]
     local args = __evalList(e[4], env)
     local all = {n = args.n + 1, obj}
     for k = 1, args.n do all[k + 1] = args[k] end
@@ -451,7 +526,7 @@ __eval = function(e, env)
   elseif t == 17 then return true
   elseif t == 18 then return false
   elseif t == 19 then local v = env.va or {n=0} return v[1]
-  elseif t == 20 then return __get(env, e[2])
+  elseif t == 20 then return __get(env, __str(e[2]))
   elseif t == 21 then
     local o = __eval(e[2], env)
     if o == nil then _err('attempt to index a nil value', 0) end
@@ -477,11 +552,18 @@ __eval = function(e, env)
     elseif op == '>' then return a > b
     elseif op == '<=' then return a <= b
     elseif op == '>=' then return a >= b
+    elseif op == '//' then return _floor(a / b)
+    elseif op == '&' then return _band(a, b)
+    elseif op == '|' then return _bor(a, b)
+    elseif op == '~' then return _bxor(a, b)
+    elseif op == '<<' then return _shl(a, b)
+    elseif op == '>>' then return _shr(a, b)
     end
     _err('bad op ' .. _tostr(op), 0)
   elseif t == 23 then
     local op = e[2]
     local v = __eval(e[3], env)
+    if op == '~' then return _bxor(v, -1) end
     if op == '-' then return -v
     elseif op == 'not' then return not v
     elseif op == '#' then return #v
@@ -512,7 +594,7 @@ end
 
 local function __assign(target, val, env)
   if _M[target[1]] == 20 then
-    __set(env, target[2], val)
+    __set(env, __str(target[2]), val)
   else
     local o = __eval(target[2], env)
     if o == nil then _err('attempt to index a nil value', 0) end
@@ -530,18 +612,18 @@ __exec = function(stmts, env)
     if t == 1 then
       local vals = __evalList(s[3], env)
       local names = s[2]
-      for k = 1, #names do env.v[names[k]] = vals[k] end
+      for k = 1, #names do env.v[__str(names[k])] = vals[k] end
     elseif t == 2 then
       local name = s[2]
-      env.v[name] = nil
+      env.v[__str(name)] = nil
       local fn = __fn(s[3], env)
-      env.v[name] = fn
+      env.v[__str(name)] = fn
     elseif t == 3 then
       local refs = {}
       for k = 1, #s[2] do
         local tg = s[2][k]
         if _M[tg[1]] == 20 then
-          refs[k] = {0, tg[2]}
+          refs[k] = {0, __str(tg[2])}
         else
           refs[k] = {1, __eval(tg[2], env), tg[3]}
         end
@@ -551,7 +633,7 @@ __exec = function(stmts, env)
         local tg, r = s[2][k], refs[k]
         local v = vals[k]
         if _M[tg[1]] == 20 then
-          __set(env, tg[2], v)
+          __set(env, __str(tg[2]), v)
         else
           local o = r[2]
           if o == nil then _err('attempt to index a nil value', 0) end
@@ -563,11 +645,11 @@ __exec = function(stmts, env)
       local path = s[2]
       local fn = __fn(s[3], env)
       if #path == 1 then
-        __set(env, path[1], fn)
+        __set(env, __str(path[1]), fn)
       else
-        local o = __get(env, path[1])
-        for k = 2, #path - 1 do o = o[path[k]] end
-        o[path[#path]] = fn
+        local o = __get(env, __str(path[1]))
+        for k = 2, #path - 1 do o = o[__str(path[k])] end
+        o[__str(path[#path])] = fn
       end
     elseif t == 5 then
       __evalMulti(s[2], env)
@@ -592,7 +674,7 @@ __exec = function(stmts, env)
         local sig = __exec(s[3], e2)
         if sig then
           if sig.t == 'break' then break end
-          return sig
+          if sig.t == 'continue' then sig = nil else return sig end
         end
       end
     elseif t == 8 then
@@ -601,7 +683,7 @@ __exec = function(stmts, env)
         local sig = __exec(s[2], e2)
         if sig then
           if sig.t == 'break' then break end
-          return sig
+          if sig.t ~= 'continue' then return sig end
         end
         if __eval(s[3], e2) then break end
       end
@@ -613,11 +695,11 @@ __exec = function(stmts, env)
       local i = a
       while (c > 0 and i <= b) or (c < 0 and i >= b) do
         local e2 = __env(env)
-        e2.v[s[2]] = i
+        e2.v[__str(s[2])] = i
         local sig = __exec(s[6], e2)
         if sig then
           if sig.t == 'break' then break end
-          return sig
+          if sig.t ~= 'continue' then return sig end
         end
         i = i + c
       end
@@ -630,11 +712,11 @@ __exec = function(stmts, env)
         ctl = res[1]
         local e2 = __env(env)
         local names = s[2]
-        for k = 1, #names do e2.v[names[k]] = res[k] end
+        for k = 1, #names do e2.v[__str(names[k])] = res[k] end
         local sig = __exec(s[4], e2)
         if sig then
           if sig.t == 'break' then break end
-          return sig
+          if sig.t ~= 'continue' then return sig end
         end
       end
     elseif t == 11 then
@@ -644,6 +726,8 @@ __exec = function(stmts, env)
       return {t = 'return', v = __evalList(s[2], env)}
     elseif t == 13 then
       return {t = 'break'}
+    elseif t == 28 then
+      return {t = 'continue'}
     end
   end
   return nil
@@ -667,7 +751,7 @@ end
 `;
 
 
-const AST_TAG = {"Local": 1, "LocalFunc": 2, "Set": 3, "FuncDecl": 4, "CallStat": 5, "If": 6, "While": 7, "Repeat": 8, "NumFor": 9, "GenFor": 10, "Do": 11, "Return": 12, "Break": 13, "Num": 14, "Str": 15, "Nil": 16, "True": 17, "False": 18, "Vararg": 19, "Name": 20, "Index": 21, "Bin": 22, "Un": 23, "Table": 24, "Func": 25, "Call": 26, "Invoke": 27};
+const AST_TAG = {"Local": 1, "LocalFunc": 2, "Set": 3, "FuncDecl": 4, "CallStat": 5, "If": 6, "While": 7, "Repeat": 8, "NumFor": 9, "GenFor": 10, "Do": 11, "Return": 12, "Break": 13, "Continue": 28, "Num": 14, "Str": 15, "Nil": 16, "True": 17, "False": 18, "Vararg": 19, "Name": 20, "Index": 21, "Bin": 22, "Un": 23, "Table": 24, "Func": 25, "Call": 26, "Invoke": 27};
 
 function encodeAst(node) {
   if (!Array.isArray(node)) return node;
@@ -785,6 +869,8 @@ function renameAst(ast, rid) {
         out.push([T.Return, s[1].map(ex)]);
       } else if (t === T.Break) {
         out.push([T.Break]);
+      } else if (t === T.Continue) {
+        out.push([T.Continue]);
       } else {
         out.push(s);
       }
@@ -795,20 +881,34 @@ function renameAst(ast, rid) {
   return blk(ast);
 }
 
+function encStr(str, K, rnd) {
+  const buf = Buffer.from(String(str), 'utf8');
+  const kk = 1 + Math.floor(rnd() * 250);
+  const bytes = [];
+  for (let i = 0; i < buf.length; i++) bytes.push(((buf[i] - kk) % 256 + 256) % 256);
+  return [(AST_TAG.Str + K) % 32, kk, bytes];
+}
+
 function encodeNode(node, K, rnd) {
   if (!Array.isArray(node)) return node;
-  if (typeof node[0] === 'number' && node[0] >= 1 && node[0] <= 27) {
+  if (typeof node[0] === 'number' && node[0] >= 1 && node[0] <= 28) {
     const tag = node[0];
-    if (tag === 15) {
-      const buf = Buffer.from(String(node[1]), 'utf8');
-      const kk = 1 + Math.floor(rnd() * 250);
-      const bytes = [];
-      for (let i = 0; i < buf.length; i++) bytes.push(((buf[i] - kk) % 256 + 256) % 256);
-      return [(tag + K) % 32, kk, bytes];
-    }
+    if (tag === 15) return encStr(node[1], K, rnd);
     const out = new Array(node.length);
     out[0] = (tag + K) % 32;
-    for (let i = 1; i < node.length; i++) out[i] = encodeNode(node[i], K, rnd);
+    const isOpSlot = (tag === 22 || tag === 23) && node.length > 1;
+    const nameArr = (tag === 1 || tag === 4 || tag === 10);
+    const nameOne = (tag === 2 || tag === 9 || tag === 20);
+    for (let i = 1; i < node.length; i++) {
+      if (isOpSlot && i === 1) { out[i] = node[i]; continue; }
+      if (nameOne && i === 1 && typeof node[i] === 'string') { out[i] = encStr(node[i], K, rnd); continue; }
+      if (nameArr && i === 1 && Array.isArray(node[i])) {
+        out[i] = node[i].map(function (x) { return (typeof x === 'string') ? encStr(x, K, rnd) : encodeNode(x, K, rnd); });
+        continue;
+      }
+      if (tag === 27 && i === 2 && typeof node[i] === 'string') { out[i] = encStr(node[i], K, rnd); continue; }
+      out[i] = encodeNode(node[i], K, rnd);
+    }
     return out;
   }
   return node.map(function (x) { return encodeNode(x, K, rnd); });
@@ -820,7 +920,10 @@ function buildVM(ast, rid, rnd) {
   const K = 1 + Math.floor(rf() * 30);
   const renamed = (process.env.VM_RENAME === '0') ? ast : renameAst(ast, rid || makeGen());
   const body = encodeNode(renamed, K, rf);
-  const runtime = VM_RUNTIME.replace('__KEY__', String(K));
+  const k1 = 1 + Math.floor(rf() * 400);
+  const k2 = 1 + Math.floor(rf() * 400);
+  const kExpr = '((' + (K + k1) + '-' + k1 + ')+(' + k2 + '-' + k2 + '))';
+  const runtime = VM_RUNTIME.replace('__KEY__', kExpr);
   const parts = [];
   parts.push('local ' + nm.A + '=' + toLua(body));
   parts.push('local ' + nm.F + '=(function()' + runtime + 'end)()');

@@ -1,7 +1,8 @@
 const LUA_KW = {
   'and': 1, 'break': 1, 'do': 1, 'else': 1, 'elseif': 1, 'end': 1, 'false': 1,
   'for': 1, 'function': 1, 'goto': 1, 'if': 1, 'in': 1, 'local': 1, 'nil': 1,
-  'not': 1, 'or': 1, 'repeat': 1, 'return': 1, 'then': 1, 'true': 1, 'until': 1, 'while': 1
+  'not': 1, 'or': 1, 'repeat': 1, 'return': 1, 'then': 1, 'true': 1, 'until': 1, 'while': 1,
+  'continue': 1
 };
 
 function isDigit(c) { return c >= '0' && c <= '9'; }
@@ -167,11 +168,19 @@ function lexLua(src) {
       i = j; continue;
     }
 
+    if (c === '`') {
+      let j = i + 1, buf = '';
+      while (j < n && src[j] !== '`') { buf += src[j]; j++; }
+      toks.push({ t: 'str', v: buf, interp: true });
+      i = j + 1; continue;
+    }
     const three = src.substr(i, 3);
-    if (three === '...') { toks.push({ t: 'op', v: '...' }); i += 3; continue; }
+    if (three === '...' || three === '//=' || three === '..=') { toks.push({ t: 'op', v: three }); i += 3; continue; }
     const two = src.substr(i, 2);
     if (two === '..' || two === '==' || two === '~=' || two === '<=' || two === '>=' ||
-        two === '//' || two === '<<' || two === '>>' || two === '::') {
+        two === '//' || two === '<<' || two === '>>' || two === '::' ||
+        two === '+=' || two === '-=' || two === '*=' || two === '/=' ||
+        two === '%=' || two === '^=') {
       toks.push({ t: 'op', v: two }); i += 2; continue;
     }
     toks.push({ t: 'op', v: c }); i++; continue;
@@ -192,12 +201,13 @@ function rngFactory(seed) {
 const CONTINUE_PREV = {
   '+': 1, '-': 1, '*': 1, '/': 1, '%': 1, '^': 1, '..': 1, '(': 1, '[': 1, '{': 1,
   ',': 1, '=': 1, '==': 1, '~=': 1, '<': 1, '>': 1, '<=': 1, '>=': 1, 'and': 1, 'or': 1,
-  'not': 1, '#': 1, '.': 1, ':': 1, '//': 1, '<<': 1, '>>': 1, '::': 1
+  'not': 1, '#': 1, '.': 1, ':': 1, '//': 1, '<<': 1, '>>': 1, '::': 1,
+  '+=': 1, '-=': 1, '*=': 1, '/=': 1, '%=': 1, '^=': 1, '..=': 1, '//=': 1, '&': 1, '|': 1, '~': 1
 };
 const CONTINUE_NEXT = {
   'and': 1, 'or': 1, ')': 1, ']': 1, '}': 1, ',': 1, '.': 1, ':': 1, '..': 1,
   '+': 1, '-': 1, '*': 1, '/': 1, '%': 1, '^': 1, '==': 1, '~=': 1, '<': 1, '>': 1,
-  '<=': 1, '>=': 1, '//': 1, '<<': 1, '>>': 1
+  '<=': 1, '>=': 1, '//': 1, '<<': 1, '>>': 1, '&': 1, '|': 1, '~': 1
 };
 const STMT_KEYWORDS = {
   'local': 1, 'if': 1, 'for': 1, 'while': 1, 'do': 1, 'return': 1, 'end': 1,
@@ -585,7 +595,15 @@ function luaObfuscate(source, options) {
   let result = pre ? (pre + ' return (function() ' + body + ' end)()') : body;
 
   if (o.wrap && Number(o.level) >= 5 && !o.remote && process.env.FULL_VM !== '0') {
-    const vmCode = tryFullVM(source, rid);
+    let vmCode = tryFullVM(source, rid);
+    if (!vmCode) {
+      const why = (function () {
+        try { require('./vm.js').parseLua(lexLua(source)); return 'unknown'; }
+        catch (e) { return String(e && e.message || e); }
+      })();
+      console.warn('[obf] full VM cannot compile this script, falling back to packing: ' + why);
+      o.vmFallback = why;
+    }
     if (vmCode) {
       let packed = vmCode;
       let prev = -1;
@@ -665,7 +683,7 @@ function luaObfuscate(source, options) {
     var junkChars = built.code.length;
   }
 
-  return { code: result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0) } };
+  return { code: result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0), fullVm: false, vmFallback: o.vmFallback || '' } };
 }
 
 
