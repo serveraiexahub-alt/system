@@ -548,7 +548,10 @@ function luaObfuscate(source, options) {
       const cur = outTok[i];
       const prevWord = /[A-Za-z0-9_]$/.test(prev);
       const curWord = /^[A-Za-z0-9_]/.test(cur);
-      let needSpace = prevWord && curWord;
+      // a number/identifier followed by a keyword needs a separator even when the
+      // previous token ended with ')' — e.g. "(1-1)for" is invalid Lua
+      const prevEndsNumberish = /[A-Za-z0-9_)\]}]$/.test(prev) && /^[A-Za-z_]/.test(cur);
+      let needSpace = (prevWord && curWord) || prevEndsNumberish;
       if (!needSpace) {
         const a = prev[prev.length - 1], b = cur[0];
         if (a === '-' && b === '-') needSpace = true;
@@ -579,11 +582,11 @@ function luaObfuscate(source, options) {
     const key = Math.floor(rnd() * 200) + 29;
     const vP = rid(), vK = rid(), vD = rid(), vC = rid(), vS = sfn;
     const vI = rid(), vJ = rid(), vB = rid(), vM = rid(), vT = rid(), vR = rid(), vN = rid();
-    pre = 'local ' + vP + '={' + pool.map(function (s) { return '"' + s + '"'; }).join(',') + '} ' +
+    pre = 'local ' + vS + '=(function() local ' + vP + '={' + pool.map(function (s) { return '"' + s + '"'; }).join(',') + '} ' +
       'local ' + vK + '=' + key + ' ' +
       'local ' + vD + '=' + DECOY + ' ' +
       'local ' + vC + '={} ' +
-      'local function ' + vS + '(' + vI + ') ' +
+      'local function ' + vS + 'x(' + vI + ') ' +
       'if ' + vC + '[' + vI + '] then return ' + vC + '[' + vI + '] end ' +
       'local ' + vD + 'x=' + vP + '[' + vI + '] ' +
       'local ' + vN + '=#' + vD + 'x ' +
@@ -596,10 +599,10 @@ function luaObfuscate(source, options) {
       'end ' +
       'local ' + vR + '=table.concat(' + vT + ') ' +
       vC + '[' + vI + ']=' + vR + ' ' +
-      'return ' + vR + ' end ';
+      'return ' + vR + ' end return ' + vS + 'x end)() ';
   }
 
-  let result = pre ? (pre + ' return (function() ' + body + ' end)()') : body;
+  let result = pre + body;
 
   if (o.wrap && Number(o.level) >= 5 && !o.remote && process.env.FULL_VM !== '0') {
     let vmCode = tryFullVM(source, rid);
@@ -970,7 +973,7 @@ function schemeA(src, rnd, hideErrors, rid) {
   p.push('if #' + nm.S + '~=' + numLit(ch.n, rnd) + ' then return end');
   const hcA = hashCheckLines(nm, src);
   p.push(hcA[0]); p.push(hcA[1]);
-  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV');
+  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=(getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV');
   p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
   wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
   return p.join(' ');
@@ -1003,7 +1006,7 @@ function schemeB(src, rnd, hideErrors, rid) {
   p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' then return end');
   const hcB = hashCheckLines(nm, src);
   p.push(hcB[0]); p.push(hcB[1]);
-  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV');
+  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=(getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV');
   p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
   wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
   return p.join(' ');
@@ -1031,7 +1034,7 @@ function schemeC(src, rnd, hideErrors, rid) {
   p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' and #' + nm.S + '~=' + numLit(n + 1, rnd) + ' then return end');
   const hcC = hashCheckLines(nm, src);
   p.push(hcC[0]); p.push(hcC[1]);
-  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV');
+  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=(getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV');
   p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
   wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
   return p.join(' ');
@@ -1114,7 +1117,7 @@ function schemeD(src, rnd, hideErrors, rid) {
   branch.push('elseif ' + nm.T + '==' + endId + ' then ' +
     'for ' + nm.I + '=1,' + blocks.length + ' do ' + nm.S + '=' + nm.S + '..(' + nm.OUT + '[' + nm.I + '] or "") end ' +
     hashLua + 'if hh~=' + luaHash(src) + ' then ' + nm.T + '=0 elseif #' + nm.S + '~=' + numLit(n, rnd) + ' then ' + nm.T + '=0 else ' +
-    'local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV ' +
+    'local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=(getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV ' +
     nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)] ' +
     'local ' + nm.RES + '=' + nm.LD + '(' + nm.S + ') if not ' + nm.RES + ' then ' + nm.T + '=0 else ' +
     'return ' + nm.RES + '() end end');
@@ -1308,7 +1311,7 @@ function schemeE(src, rnd, hideErrors, rid) {
   p.push('elseif ' + nm.I + '==' + op('JMP') + ' then ' + nm.P + '=' + nm.HX);
   p.push('elseif ' + nm.I + '==' + op('JGT') + ' then if ' + nm.OUT + '[' + nm.HX + ']>' + nm.OUT + '[' + nm.T + '] then ' + nm.P + '=' + nm.G + ' end');
   p.push('elseif ' + nm.I + '==' + op('CONCAT') + ' then ' + nm.OUT + '[' + nm.HX + ']=table.concat(' + nm.OUT + '[' + nm.T + '] or {})');
-  p.push('elseif ' + nm.I + '==' + op('CALL') + ' then local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=getfenv and getfenv() or _ENV ' + nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)] ' + nm.OUT + '[' + nm.HX + ']=' + nm.LD + '(' + nm.OUT + '[' + nm.T + '])');
+  p.push('elseif ' + nm.I + '==' + op('CALL') + ' then local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=(getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV ' + nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)] ' + nm.OUT + '[' + nm.HX + ']=' + nm.LD + '(' + nm.OUT + '[' + nm.T + '])');
   p.push('elseif ' + nm.I + '==' + op('RET') + ' then return ' + nm.OUT + '[' + nm.HX + ']');
   p.push('elseif ' + nm.I + '==' + op('RUN') + ' then local ' + nm.FN + '=' + nm.OUT + '[' + nm.HX + '] if type(' + nm.FN + ')=="function" then return ' + nm.FN + '() end return ' + nm.FN);
   p.push('elseif ' + nm.I + '==' + op('SLICE') + ' then ' + nm.OUT + '[' + nm.HX + ']=string.sub(' + nm.OUT + '[' + nm.T + '],1,' + nm.OUT + '[' + nm.G + '])');

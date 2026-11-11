@@ -358,7 +358,7 @@ function toLua(value) {
 }
 
 const VM_RUNTIME = `
-local _G = (getfenv and getfenv()) or _ENV
+local _G = (getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV
 local _K = __KEY__
 local _M = {}
 for _i = 0, 31 do _M[_i] = (_i - _K) % 32 end
