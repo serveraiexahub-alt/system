@@ -1994,7 +1994,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 #aiorb { position: fixed; width: 60px; height: 60px; border-radius: 50%; border: 2px solid var(--fg); background: var(--panel); padding: 0; overflow: hidden; z-index: 200; cursor: grab; box-shadow: 0 6px 22px rgba(0,0,0,.55); touch-action: none; }
 #aiorb img { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
 #aiorb:active { cursor: grabbing; }
-#aimenu { position: fixed; background: var(--panel); border: 1px solid var(--line2); border-radius: 10px; padding: 6px; z-index: 10060; display: flex; flex-direction: column; gap: 4px; min-width: 150px; box-shadow: 0 10px 30px rgba(0,0,0,.6); }
+#aimenu { position: fixed; background: var(--panel); border: 1px solid var(--line2); border-radius: 10px; padding: 6px; z-index: 100080; display: flex; flex-direction: column; gap: 4px; min-width: 150px; box-shadow: 0 10px 30px rgba(0,0,0,.6); }
 .aimenuitem { display: flex; align-items: center; gap: 8px; width: 100%; background: transparent; border: 1px solid transparent; color: var(--fg); border-radius: 7px; padding: 9px 10px; font-family: inherit; font-size: 12.5px; text-align: left; }
 .aimenuitem:hover { background: var(--bg2); border-color: var(--line2); }
 .aimenuitem svg { width: 15px; height: 15px; flex: 0 0 auto; }
@@ -2029,7 +2029,9 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
 .aictx { font-size: 10px; color: var(--muted); }
 .aifoot { padding: 4px 10px 8px; font-size: 10px; color: var(--muted); }
 .aimodal { max-height: 55vh; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
-.overlay.aiopen { z-index: 10050; }
+.overlay.aiopen { z-index: 100070; }
+#aimenu2 { position: fixed; background: var(--panel); border: 1px solid var(--line2); border-radius: 10px; padding: 6px; z-index: 100080; display: flex; flex-direction: column; gap: 4px; box-shadow: 0 10px 30px rgba(0,0,0,.6); }
+.aihead .aileft { order: -1; margin-right: 2px; }
 .folderpage { max-width: 900px; margin: 0 auto; padding: 18px; }
 .fphead { display: flex; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--line2); border-radius: 14px; background: var(--bg2); margin-bottom: 12px; }
 .fpav { width: 46px; height: 46px; border-radius: 12px; background: var(--panel); display: flex; align-items: center; justify-content: center; overflow: hidden; flex: 0 0 auto; }
@@ -3065,9 +3067,10 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     }
     var panel = document.createElement('div');
     panel.id = 'aipanel';
-    panel.innerHTML = '<div class="aihead"><b>🤖 สกัด Hub AI</b>' +
+    panel.innerHTML = '<div class="aihead">' +
+      '<button class="iconbtn aileft" id="aimore">' + ICON.more + '</button>' +
+      '<b>🤖 สกัด Hub AI</b>' +
       '<select id="aimodel" class="aisel"></select>' +
-      '<button class="iconbtn" id="aimore">' + ICON.more + '</button>' +
       '<button class="iconbtn" id="aiclose">' + ICON.x + '</button></div>' +
       '<div class="aibody" id="aibody"></div>' +
       '<div class="aicmdlist" id="aicmdlist"></div>' +
@@ -3090,13 +3093,14 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       e.stopPropagation();
       var old = document.getElementById('aimenu2');
       if (old) { old.remove(); return; }
-      var r2 = e.currentTarget.getBoundingClientRect();
+      var pr = panel.getBoundingClientRect();
       var m2 = document.createElement('div');
       m2.id = 'aimenu2';
       m2.innerHTML = '<button class="aimenuitem" id="aine">' + ICON.plus + ' ' + t('ai_new_chat') + '</button>' +
         '<button class="aimenuitem" id="aihist">' + ICON.info + ' ' + t('ai_history') + '</button>';
-      m2.style.left = Math.max(8, r2.left - 160) + 'px';
-      m2.style.top = (r2.bottom + 6) + 'px';
+      m2.style.left = Math.max(8, pr.left + 8) + 'px';
+      m2.style.top = (pr.top + 46) + 'px';
+      m2.style.minWidth = '180px';
       document.body.appendChild(m2);
       function close2() { m2.remove(); document.removeEventListener('click', out2); }
       function out2(ev) { if (!m2.contains(ev.target)) close2(); }
@@ -3239,6 +3243,49 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
     document.body.appendChild(overlay);
     overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
     paint();
+  }
+
+  function openAttachMenu(anchor, panel) {
+    var old = document.getElementById('aimenu');
+    if (old) { old.remove(); return; }
+    var host = panel || document.getElementById('aipanel');
+    var pr = host ? host.getBoundingClientRect() : { left: 8, bottom: window.innerHeight - 8 };
+    var m = document.createElement('div');
+    m.id = 'aimenu';
+    m.innerHTML = '<button type="button" class="aimenuitem" id="aim-dev">' + ICON.plus + ' ' + t('from_device') + '</button>' +
+      '<button type="button" class="aimenuitem" id="aim-site">' + ICON.file + ' ' + t('site_files') + '</button>';
+    m.style.left = Math.max(8, pr.left + 8) + 'px';
+    m.style.bottom = Math.max(8, window.innerHeight - pr.bottom + 56) + 'px';
+    m.style.top = 'auto';
+    m.style.minWidth = '190px';
+    document.body.appendChild(m);
+    function close() { m.remove(); document.removeEventListener('click', outside); }
+    function outside(ev) { if (!m.contains(ev.target)) close(); }
+    setTimeout(function () { document.addEventListener('click', outside); }, 0);
+    m.querySelector('#aim-dev').onclick = function (ev) {
+      ev.stopPropagation();
+      close();
+      var inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = '.lua,.txt,.js,.json,text/plain';
+      inp.onchange = function () {
+        var f = inp.files[0]; if (!f) return;
+        if (f.size > 300 * 1024) { toast(t('img_too_big'), true); return; }
+        var rd = new FileReader();
+        rd.onload = function () {
+          aiState.context += '\\n--- ไฟล์จากเครื่อง: ' + f.name + ' ---\\n' + String(rd.result || '');
+          var c = document.getElementById('aictx'); if (c) c.textContent = t('ai_ctx_on');
+          toast(t('saved'));
+        };
+        rd.readAsText(f);
+      };
+      inp.click();
+    };
+    m.querySelector('#aim-site').onclick = function (ev) {
+      ev.stopPropagation();
+      close();
+      attachForAi();
+    };
   }
 
   function attachForAi() {
