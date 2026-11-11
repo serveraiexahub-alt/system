@@ -486,6 +486,21 @@ client.on('messageCreate', async function (message) {
     const content = (message.content || '').trim();
     if (!content.startsWith('!')) return;
     const cmd = content.replace(/^!+/, '').split(/\s+/)[0];
+    if (cmd === 'แอดมิน' || cmd === 'admin') {
+      if (!isOwnerOrStaff(message.member)) return message.reply({ content: 'เฉพาะเจ้าของ/พนักงานเท่านั้น', flags: MessageFlags.Ephemeral }).catch(function () {});
+      const parts = content.split(/\s+/);
+      const uname = (parts[1] || '').trim();
+      if (!uname) return message.reply({ content: 'วิธีใช้: !แอดมิน ชื่อในเว็บ', flags: MessageFlags.Ephemeral }).catch(function () {});
+      const r = await fetch(WEB_URL + '/api/discord/admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
+        body: JSON.stringify({ username: uname, staffId: message.author.id })
+      });
+      const d = await r.json().catch(function () { return {}; });
+      if (!r.ok) return message.reply({ content: '❌ ' + (d.error || r.status) });
+      return message.reply({ content: '🔧 ให้แอดมิน **' + d.username + '** แล้ว (ไอคอนผู้สร้างเว็บ · ปกปิดไม่จำกัด · ทุกระดับ)' });
+    }
+
     if (cmd === 'help') {
       return message.reply({
         embeds: [new EmbedBuilder()
@@ -495,6 +510,7 @@ client.on('messageCreate', async function (message) {
             '**`!เซฟข้อมูลทั้งหมด`** — สำรองข้อมูลเว็บ + บอท เป็นไฟล์\n' +
             '**`!อัปข้อมูล`** — นำเข้าไฟล์สำรอง (แนบหรือตอบกลับไฟล์ .json)\n' +
             
+            '**`!แอดมิน ชื่อในเว็บ`** — ให้แอดมินเว็บ (เจ้าของ/พนักงาน)\n' +
             '**`!help`** — แสดงคำสั่งทั้งหมด'
           )
           .setFooter({ text: 'เฉพาะพนักงาน: เซฟ/อัปข้อมูล' })]

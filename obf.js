@@ -414,12 +414,18 @@ function luaObfuscate(source, options) {
       }
 
       if (pendingLocal && pendingLocal.endAt === -1) {
-        if (tk.t === 'op' && tk.v === '=' && i === pendingLocal.rhsStart - 1) {
-          // RHS begins below
-        }
         if (i === pendingLocal.rhsStart) {
           let stopAt = i;
-          while (stopAt < real.length && !ends[stopAt]) stopAt++;
+          if (real[i] && real[i].t === 'kw' && real[i].v === 'function') {
+            let depth = 0;
+            for (let k = i; k < real.length; k++) {
+              const tk2 = real[k];
+              if (tk2.t === 'kw' && tk2.v === 'function') depth++;
+              else if (tk2.t === 'kw' && tk2.v === 'end') { depth--; if (depth === 0) { stopAt = k + 1; break; } }
+            }
+          } else {
+            while (stopAt < real.length && !ends[stopAt]) stopAt++;
+          }
           pendingLocal.endAt = stopAt;
         }
       }
