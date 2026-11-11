@@ -1342,7 +1342,8 @@ function packBlob(src, rnd, hideErrors, rid, avoid, forceIdx) {
 
 function luaHash(str) {
   let h = 0;
-  for (let i = 0; i < str.length; i++) h = (h * 31 + (str.charCodeAt(i) & 255)) % 65521;
+  const bs = toByteString(String(str));
+  for (let i = 0; i < bs.length; i++) h = (h * 31 + (bs.charCodeAt(i) & 255)) % 65521;
   return h;
 }
 
