@@ -220,28 +220,17 @@ const LEVELS = {
   3: { layers: 3, junk: 8,   decoys: 60,  junkMul: 8,   strings: true, numbers: true, rename: true, fakes: 1 },
   4: { layers: 4, junk: 15,  decoys: 120, junkMul: 15,  strings: true, numbers: true, rename: true, fakes: 2 },
   5: { layers: 5, junk: 25,  decoys: 200, junkMul: 25,  strings: true, numbers: true, rename: true, fakes: 3 },
-  6: { layers: 6, junk: 14,  decoys: 90,  junkMul: 14,  strings: true, numbers: true, rename: true, fakes: 3, shard: true }
-};
-
-// junk size presets (premium pick): small is fast, large is heaviest
-const JUNK_PRESETS = {
-  small:  { junkMul: 4,  decoys: 30,  packRounds: 2 },
-  medium: { junkMul: 14, decoys: 90,  packRounds: 2 },
-  large:  { junkMul: 40, decoys: 300, packRounds: 3 }
+  6: { layers: 6, junk: 10,  decoys: 60,  junkMul: 10,  strings: true, numbers: true, rename: true, fakes: 3, shard: true }
 };
 
 function luaObfuscate(source, options) {
   const opts = options || {};
-  let junkPreset = null;
-  if (opts.junkSize && JUNK_PRESETS[opts.junkSize]) junkPreset = JUNK_PRESETS[opts.junkSize];
   const lv = LEVELS[Math.max(1, Math.min(6, Number(opts.level) || 3))];
   const o = Object.assign({
     strings: lv.strings, numbers: lv.numbers, rename: lv.rename,
     junk: true, wrap: true, hideErrors: true, seed: Date.now(),
     layers: lv.layers, junkSize: lv.junk, decoys: lv.decoys, junkMul: lv.junkMul, fakes: lv.fakes || 0, remote: false,
-    packRounds: junkPreset ? junkPreset.packRounds : undefined,
-    junkMul: junkPreset ? junkPreset.junkMul : lv.junkMul,
-    decoys: junkPreset ? junkPreset.decoys : lv.decoys
+    packRounds: 2
   }, opts);
   const rnd = rngFactory(o.seed || 1);
   const toks = lexLua(source);
@@ -632,7 +621,7 @@ function luaObfuscate(source, options) {
         prev = p2.scheme;
       }
       const mul = Math.max(0, Number(o.junkMul) || 0);
-      const target = Math.min(600000, Math.floor(String(source).length * mul));
+      const target = Math.min(400000, Math.floor(String(source).length * mul));
       let out = packed;
       if (target > 0) {
         const built = buildJunkToSize(rnd, rid, target, Math.max(0, Number(o.decoys) || 0));
@@ -671,7 +660,7 @@ function luaObfuscate(source, options) {
   if (mul > 0 || minDecoys > 0) {
     const baseLen = String(source).length;
     const room = Math.max(0, 8500000 - result.length);
-    const targetChars = Math.min(room, Math.floor(baseLen * mul));
+    const targetChars = Math.min(room, Math.min(400000, Math.floor(baseLen * mul)));
     const built = buildJunkToSize(rnd, rid, targetChars, minDecoys);
     if (built.code) {
       const rn = rid();
