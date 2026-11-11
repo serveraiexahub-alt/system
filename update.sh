@@ -41,10 +41,19 @@ else
 fi
 
 echo "[4/5] หยุดของเก่า"
-pkill -f "run-web.sh" 2>/dev/null || true
-pkill -f "run-bot.sh" 2>/dev/null || true
-pkill -f "node server.js" 2>/dev/null || true
-pkill -f "node bot.js" 2>/dev/null || true
+# ฆ่าเฉพาะ process จริง ไม่แตะตัวเองหรือ shell แม่
+kill_matching() {
+  local pat="$1" self="$$" parent="$PPID" pid
+  for pid in $(pgrep -f "$pat" 2>/dev/null); do
+    [ "$pid" = "$self" ] && continue
+    [ "$pid" = "$parent" ] && continue
+    kill "$pid" 2>/dev/null || true
+  done
+}
+kill_matching "run-web[.]sh"
+kill_matching "run-bot[.]sh"
+kill_matching "^node server[.]js"
+kill_matching "^node bot[.]js"
 rm -f bot.lock
 sleep 2
 
