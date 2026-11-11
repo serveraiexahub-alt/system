@@ -34,10 +34,13 @@ else
 fi
 
 echo "[3/5] ตรวจ dependencies"
-if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ package-lock.json -nt node_modules ]; then
+LOCK_HASH="$(md5sum package-lock.json 2>/dev/null | cut -d" " -f1)"
+STAMP="node_modules/.pkgstamp"
+if [ ! -d node_modules ] || [ ! -f "$STAMP" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$LOCK_HASH" ]; then
   npm install --no-audit --no-fund || { echo "npm install ล้มเหลว"; exit 1; }
+  printf "%s" "$LOCK_HASH" > "$STAMP" 2>/dev/null || true
 else
-  echo "      ไม่ต้องติดตั้งเพิ่ม"
+  echo "      ไม่ต้องติดตั้งเพิ่ม (package-lock ไม่เปลี่ยน)"
 fi
 
 echo "[4/5] หยุดของเก่า"
