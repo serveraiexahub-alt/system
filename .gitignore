@@ -8,3 +8,5 @@ bot.lock
 bot.log
 server.log
 server.log.1
+tests/.tmp_*
+tests/.luau_*
