@@ -6,3 +6,5 @@ data.json.tmp
 bot-state.json
 bot.lock
 bot.log
+server.log
+server.log.1
