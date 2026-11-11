@@ -30,6 +30,17 @@ const { makeCaptcha } = require('./captcha.js');
 
 const CHANGELOG = [
   {
+    v: 'v2.0', date: '11 พ.ย. 2026',
+    items: [
+      'เพิ่มผู้ช่วย AI ในเว็บ (เฉพาะพรีเมี่ยม)',
+      'เพิ่มประวัติแชทและจำกัด 25 ข้อความต่อแชท',
+      'แนบไฟล์แล้วเห็นชื่อและขนาดไฟล์',
+      'แก้บัค AI ตอบว่าไม่มีข้อความ',
+      'แก้บัคแจ้งเตือนอัปเดตซ้ำ',
+      'ปรับราคาและสิทธิ์พรีเมี่ยม'
+    ]
+  },
+  {
     v: 'v1.9', date: '10 พ.ย. 2026',
     items: [
       'เพิ่มช่องดูประวัติการอัปเดตในเมนู',
@@ -981,7 +992,7 @@ app.post('/api/ai/chat', auth, async function (req, res) {
     const content = String((m && m.content) || '').slice(0, 20000);
     if (content) msgs.push({ role: role, content: content });
   }
-  if (msgs.length < 2) return res.status(400).json({ error: 'ไม่มีข้อความ' });
+  if (msgs.length < 2) return res.status(400).json({ error: 'ยังไม่มีข้อความให้ตอบ — พิมพ์คำถามก่อน' });
 
   try {
     const r = await fetch('https://api.deepseek.com/chat/completions', {
@@ -1741,11 +1752,9 @@ async function notifyUpdateIfNeeded() {
   const h = changelogHash();
   if (db.lastNotifiedHash === h) return;
   const prev = await lastAnnouncedVersion();
-  let ver;
-  if (!prev) {
-    ver = base;
-  } else {
-    ver = 'v' + bumpVersion(prev.replace(/^v/, ''));
+  let ver = base;
+  if (prev && prev === String(base).replace(/^v/, '')) {
+    ver = 'v' + bumpVersion(prev);
   }
   const top = CHANGELOG[0];
   const items = (top.items || []).map(function (x) { return '• ' + x; }).join('\n');
@@ -3197,9 +3206,13 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
         aiSyncSession();
         aiPaint();
       }
-      api('/api/ai/chat', { method: 'POST', body: { model: aiState.model, messages: aiState.messages.slice(0, -0), context: aiState.context } })
+      api('/api/ai/chat', { method: 'POST', body: { model: aiState.model, messages: aiState.messages.filter(function (m) { return m.role === 'user' || m.role === 'assistant'; }).slice(-20), context: aiState.context } })
         .then(function (d) { done(d.reply, d.left); })
-        .catch(function (e) { done('⚠️ ' + e.message, undefined); });
+        .catch(function (e) {
+        var msg = String(e && e.message || e);
+        if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) msg = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — เช็กว่าเว็บรันอยู่ แล้วลองใหม่';
+        done('⚠️ ' + msg, undefined);
+      });
     }
     sendBtn.onclick = send;
     panel.querySelector('#aicmdlist').style.display = 'none';
