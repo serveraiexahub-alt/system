@@ -549,7 +549,7 @@ function luaObfuscate(source, options) {
     }
     body += outTok[i];
     if (o.junk && rnd() < 0.08 && /^(then|do|else|repeat)$/.test(outTok[i])) {
-      body += ' local ' + makeName() + '=(' + (Math.floor(rnd() * 1000) + 1) + '-' + (Math.floor(rnd() * 500)) + ')';
+      body += ' do local ' + makeName() + '=(' + (Math.floor(rnd() * 1000) + 1) + '-' + (Math.floor(rnd() * 500)) + ') end';
     }
   }
 
@@ -582,7 +582,7 @@ function luaObfuscate(source, options) {
       'return ' + vR + ' end ';
   }
 
-  let result = pre + body;
+  let result = pre ? (pre + ' return (function() ' + body + ' end)()') : body;
 
   if (o.wrap && Number(o.level) >= 5 && !o.remote && process.env.FULL_VM !== '0') {
     const vmCode = tryFullVM(source, rid);
