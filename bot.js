@@ -61,6 +61,8 @@ const EMOJI_1M = process.env.EMOJI_1M || '<:emoji_24:1569340565290483752>';
 const EMOJI_1Y = process.env.EMOJI_1Y || '<:emoji_23:1569340427667116193>';
 const PRICE_1M = Number(process.env.PRICE_1M) || 25;
 const PRICE_1Y = Number(process.env.PRICE_1Y) || 220;
+const PRICE_M1M = Number(process.env.PRICE_MAX1M) || 45;
+const PRICE_M1Y = Number(process.env.PRICE_MAX1Y) || 399;
 const EMOJI_VERIFY_ID = (String(EMOJI_VERIFY).match(/:(\d+)>/) || [])[1] || '';
 const EMOJI_PREMIUM_ID = (String(EMOJI_PREMIUM).match(/:(\d+)>/) || [])[1] || '';
 const EMOJI_1M_ID = (String(EMOJI_1M).match(/:(\d+)>/) || [])[1] || '';
@@ -247,7 +249,8 @@ function isStaff(member) {
 }
 
 async function webPremium(username, plan, staff) {
-  const res = await fetch(WEB_URL + '/api/discord/premium', {
+  const isMaxPlan = plan === 'max1m' || plan === 'max1y';
+  const res = await fetch(WEB_URL + (isMaxPlan ? '/api/discord/max' : '/api/discord/premium'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
     body: JSON.stringify({
@@ -267,17 +270,22 @@ function roomPayload(channelId) {
     .setColor(0xf1c40f)
     .setDescription(
       '**ชื่อบัญชีเว็บ:** ' + (st.username ? '`' + st.username + '`' : 'ยังไม่ได้กรอก') + '\n' +
-      '**แพ็กเกจ:** ' + (st.plan === '1y' ? (EMOJI_1Y + ' 1 ปี · ' + PRICE_1Y + ' บาท') : (st.plan === '1m' ? (EMOJI_1M + ' 1 เดือน · ' + PRICE_1M + ' บาท') : 'ยังไม่ได้เลือก')) + '\n\n' +
-      '**ราคา**\n' + EMOJI_1M + ' 1 เดือน — ' + PRICE_1M + ' บาท\n' + EMOJI_1Y + ' 1 ปี — ' + PRICE_1Y + ' บาท\n\n' +
+      '**แพ็กเกจ:** ' + (st.plan === '1y' ? (EMOJI_1Y + ' พรีเมียม 1 ปี · ' + PRICE_1Y + ' บาท') : (st.plan === '1m' ? (EMOJI_1M + ' พรีเมียม 1 เดือน · ' + PRICE_1M + ' บาท') : (st.plan === 'max1m' ? ('👑 MAX 1 เดือน · ' + PRICE_M1M + ' บาท') : (st.plan === 'max1y' ? ('👑 MAX 1 ปี · ' + PRICE_M1Y + ' บาท') : 'ยังไม่ได้เลือก')))) + '\n\n' +
+      '**ราคา**\n' + EMOJI_1M + ' พรีเมียม 1 เดือน — ' + PRICE_1M + ' บาท\n' + EMOJI_1Y + ' พรีเมียม 1 ปี — ' + PRICE_1Y + ' บาท\n' +
+      '👑 **MAX** 1 เดือน — ' + PRICE_M1M + ' บาท (ปลดล็อก L6)\n' +
+      '👑 **MAX** 1 ปี — ' + PRICE_M1Y + ' บาท (ปลดล็อก L6)\n\n' +
       'ขั้นตอน: กรอกชื่อบัญชีเว็บ → เลือกช่องทางจ่ายเงิน → พนักงานเลือกแพ็กเกจ → พนักงานกด **ยืนยันให้พรีเมียม**'
     )
     .setFooter({ text: 'ปิดห้องได้เมื่อให้พรีเมียมเสร็จ' });
   const b1 = new ButtonBuilder().setCustomId('prem_user').setLabel('กรอกชื่อบัญชี').setEmoji('👤').setStyle(ButtonStyle.Primary);
-  const b2 = new ButtonBuilder().setCustomId('prem_1m').setLabel('1 เดือน · ' + PRICE_1M + ' บาท').setStyle(ButtonStyle.Secondary);
-  const b3 = new ButtonBuilder().setCustomId('prem_1y').setLabel('1 ปี · ' + PRICE_1Y + ' บาท').setStyle(ButtonStyle.Secondary);
+  const b2 = new ButtonBuilder().setCustomId('prem_1m').setLabel('พรีเมียม 1m · ' + PRICE_1M).setStyle(ButtonStyle.Secondary);
+  const b3 = new ButtonBuilder().setCustomId('prem_1y').setLabel('พรีเมียม 1y · ' + PRICE_1Y).setStyle(ButtonStyle.Secondary);
+  const b4 = new ButtonBuilder().setCustomId('prem_max1m').setLabel('MAX 1m · ' + PRICE_M1M).setStyle(ButtonStyle.Primary);
+  const b5 = new ButtonBuilder().setCustomId('prem_max1y').setLabel('MAX 1y · ' + PRICE_M1Y).setStyle(ButtonStyle.Primary);
   if (EMOJI_1M_ID) b2.setEmoji(EMOJI_1M_ID);
   if (EMOJI_1Y_ID) b3.setEmoji(EMOJI_1Y_ID);
   const row1 = new ActionRowBuilder().addComponents(b1, b2, b3);
+  const row4 = new ActionRowBuilder().addComponents(b4, b5);
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('prem_apply').setLabel('ยืนยันให้พรีเมียม').setEmoji('✅').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('prem_close').setLabel('ปิดห้อง').setEmoji('🔒').setStyle(ButtonStyle.Danger)
@@ -287,7 +295,7 @@ function roomPayload(channelId) {
     new ButtonBuilder().setCustomId('prem_pay_bank').setLabel('จ่ายผ่านธนาคาร').setEmoji('🏦').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('prem_call').setLabel('เรียกพนักงาน').setEmoji('🔔').setStyle(ButtonStyle.Secondary)
   );
-  return { embeds: [embed], components: [row1, row2, row3] };
+  return { embeds: [embed], components: [row1, row4, row2, row3] };
 }
 
 async function ensurePremiumPanel() {
@@ -478,22 +486,6 @@ client.on('messageCreate', async function (message) {
     const content = (message.content || '').trim();
     if (!content.startsWith('!')) return;
     const cmd = content.replace(/^!+/, '').split(/\s+/)[0];
-    if (cmd === 'APIAI' || cmd === 'apiai') {
-      if (!isOwnerOrStaff(message.member)) return message.reply({ content: 'เฉพาะพนักงานเท่านั้น' });
-      const parts = content.split(/\s+/);
-      const key = (parts[1] || '').trim();
-      if (!key) return message.reply({ content: 'วิธีใช้: !APIAI sk-xxxx' , flags: MessageFlags.Ephemeral}).catch(function () {});
-      const r = await fetch(WEB_URL + '/api/discord/ai-key', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
-        body: JSON.stringify({ key: key })
-      });
-      const d = await r.json().catch(function () { return {}; });
-      const reply = r.ok ? ('✅ ติดตั้ง API key แล้ว: `' + d.masked + '`') : ('❌ ' + (d.error || r.status));
-      try { await message.author.send({ content: reply }); } catch (e) {}
-      return message.reply({ content: r.ok ? '✅ ติดตั้ง API key เรียบร้อย (ส่งรายละเอียดทาง DM)' : ('❌ ' + (d.error || 'ติดตั้งไม่สำเร็จ')) }).catch(function () {});
-    }
-
     if (cmd === 'help') {
       return message.reply({
         embeds: [new EmbedBuilder()
@@ -502,10 +494,10 @@ client.on('messageCreate', async function (message) {
           .setDescription(
             '**`!เซฟข้อมูลทั้งหมด`** — สำรองข้อมูลเว็บ + บอท เป็นไฟล์\n' +
             '**`!อัปข้อมูล`** — นำเข้าไฟล์สำรอง (แนบหรือตอบกลับไฟล์ .json)\n' +
-            '**`!APIAI sk-xxxx`** — ติดตั้ง DeepSeek API key ให้ระบบ AI (พนักงาน)\n' +
+            
             '**`!help`** — แสดงคำสั่งทั้งหมด'
           )
-          .setFooter({ text: 'เฉพาะพนักงาน: เซฟ/อัปข้อมูล, APIAI' })]
+          .setFooter({ text: 'เฉพาะพนักงาน: เซฟ/อัปข้อมูล' })]
       });
     }
 
@@ -688,13 +680,14 @@ client.on('interactionCreate', async function (interaction) {
       return;
     }
 
-    if (interaction.isButton() && (interaction.customId === 'prem_1m' || interaction.customId === 'prem_1y')) {
+    if (interaction.isButton() && (interaction.customId === 'prem_1m' || interaction.customId === 'prem_1y' || interaction.customId === 'prem_max1m' || interaction.customId === 'prem_max1y')) {
       if (!isStaff(interaction.member)) {
         return interaction.reply({ content: 'เฉพาะพนักงานเท่านั้นที่เลือกแพ็กเกจได้', flags: MessageFlags.Ephemeral });
       }
       const st = roomState[interaction.channelId];
       if (!st) return interaction.reply({ content: 'ไม่พบข้อมูลห้องนี้', flags: MessageFlags.Ephemeral });
-      st.plan = interaction.customId === 'prem_1y' ? '1y' : '1m';
+      const planMap = { prem_1m: '1m', prem_1y: '1y', prem_max1m: 'max1m', prem_max1y: 'max1y' };
+      st.plan = planMap[interaction.customId];
       saveRoomState();
       await interaction.update(roomPayload(interaction.channelId)).catch(function () {});
       return;
@@ -729,7 +722,8 @@ client.on('interactionCreate', async function (interaction) {
         roleNote = '\n⚠️ บัญชีนี้ยังไม่ผูก Discord จึงยังให้ยศไม่ได้';
       }
       await interaction.editReply({
-        content: EMOJI_PREMIUM + ' ให้พรีเมียม **' + st.username + '** แพ็กเกจ ' + (st.plan === '1y' ? '1 ปี' : '1 เดือน') +
+        content: (st.plan.indexOf('max') === 0 ? '👑' : EMOJI_PREMIUM) + ' ให้' + (st.plan.indexOf('max') === 0 ? ' **MAX** ' : 'พรีเมียม ') + '**' + st.username + '** แพ็กเกจ ' +
+          (st.plan === '1y' ? 'พรีเมียม 1 ปี' : st.plan === '1m' ? 'พรีเมียม 1 เดือน' : st.plan === 'max1m' ? 'MAX 1 เดือน' : 'MAX 1 ปี') +
           ' แล้ว\nหมดอายุ <t:' + untilTs + ':F>' + roleNote
       });
       const logCh = await client.channels.fetch(VERIFY_LOG).catch(function () { return null; });

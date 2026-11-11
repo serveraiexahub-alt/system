@@ -438,6 +438,7 @@ end
 local __U = _U
 local __G = _G
 local function __pack(...) return {n = _sel('#', ...), ...} end
+local __strcache = {}
 local function __str(n)
   if _type(n) == "string" then return n end
   local c = n[4]
@@ -447,6 +448,7 @@ local function __str(n)
   for i = 1, #b do o[i] = _char((b[i] + k) % 256) end
   local s = _concat(o)
   n[4] = s
+  __strcache[#__strcache + 1] = n
   return s
 end
 local function __env(parent) return {v = {}, p = parent} end
@@ -486,7 +488,7 @@ __fn = function(node, env)
 end
 
 __evalMulti = function(e, env)
-  local t = _M[e[1]]
+  local t = e[1]
   if t == 26 then
     local f = __eval(e[2], env)
     local args = __evalList(e[3], env)
@@ -519,7 +521,7 @@ __evalList = function(list, env)
 end
 
 __eval = function(e, env)
-  local t = _M[e[1]]
+  local t = e[1]
   if t == 14 then return _tonum(e[2]) or 0
   elseif t == 15 then return __str(e)
   elseif t == 16 then return nil
@@ -531,7 +533,7 @@ __eval = function(e, env)
     local o = __eval(e[2], env)
     if o == nil then _err('attempt to index a nil value', 0) end
     local k = e[3]
-    if _M[k[1]] == 15 then return o[__str(k)] end
+    if k[1] == 15 then return o[__str(k)] end
     return o[__eval(k, env)]
   elseif t == 22 then
     local op = e[2]
@@ -593,22 +595,26 @@ __eval = function(e, env)
 end
 
 local function __assign(target, val, env)
-  if _M[target[1]] == 20 then
+  if target[1] == 20 then
     __set(env, __str(target[2]), val)
   else
     local o = __eval(target[2], env)
     if o == nil then _err('attempt to index a nil value', 0) end
     local k = target[3]
-    if _M[k[1]] == 15 then o[__str(k)] = val else o[__eval(k, env)] = val end
+    if k[1] == 15 then o[__str(k)] = val else o[__eval(k, env)] = val end
   end
 end
 
 __exec = function(stmts, env)
   __tick = (__tick or 0) + 1
   if __tick % 4000 == 0 and not _canary() then return nil end
+  if __tick % 1500 == 0 then
+    for k = 1, #__strcache do __strcache[k][4] = nil end
+    __strcache = {}
+  end
   for si = 1, #stmts do
     local s = stmts[si]
-    local t = _M[s[1]]
+    local t = s[1]
     if t == 1 then
       local vals = __evalList(s[3], env)
       local names = s[2]
@@ -622,7 +628,7 @@ __exec = function(stmts, env)
       local refs = {}
       for k = 1, #s[2] do
         local tg = s[2][k]
-        if _M[tg[1]] == 20 then
+        if tg[1] == 20 then
           refs[k] = {0, __str(tg[2])}
         else
           refs[k] = {1, __eval(tg[2], env), tg[3]}
@@ -632,13 +638,13 @@ __exec = function(stmts, env)
       for k = 1, #s[2] do
         local tg, r = s[2][k], refs[k]
         local v = vals[k]
-        if _M[tg[1]] == 20 then
+        if tg[1] == 20 then
           __set(env, __str(tg[2]), v)
         else
           local o = r[2]
           if o == nil then _err('attempt to index a nil value', 0) end
           local key = r[3]
-          if _M[key[1]] == 15 then o[__str(key)] = v else o[__eval(key, env)] = v end
+          if key[1] == 15 then o[__str(key)] = v else o[__eval(key, env)] = v end
         end
       end
     elseif t == 4 then
@@ -670,7 +676,7 @@ __exec = function(stmts, env)
       if sig then return sig end
     elseif t == 7 then
       while __eval(s[2], env) do
-        local e2 = __env(env)
+        local e2 = s[4] and __env(env) or env
         local sig = __exec(s[3], e2)
         if sig then
           if sig.t == 'break' then break end
@@ -679,7 +685,7 @@ __exec = function(stmts, env)
       end
     elseif t == 8 then
       while true do
-        local e2 = __env(env)
+        local e2 = s[4] and __env(env) or env
         local sig = __exec(s[2], e2)
         if sig then
           if sig.t == 'break' then break end
@@ -720,7 +726,7 @@ __exec = function(stmts, env)
         end
       end
     elseif t == 11 then
-      local sig = __exec(s[2], __env(env))
+      local sig = __exec(s[2], s[3] and __env(env) or env)
       if sig then return sig end
     elseif t == 12 then
       return {t = 'return', v = __evalList(s[2], env)}
@@ -733,6 +739,19 @@ __exec = function(stmts, env)
   return nil
 end
 
+local function _rs(n)
+  if _type(n) ~= "table" then return end
+  local t = n[1]
+  if _type(t) == "number" and t >= 0 and t <= 31 then
+    local real = _M[t]
+    n[1] = real
+    if real == 15 then return end
+    for i = 2, #n do _rs(n[i]) end
+  else
+    for i = 1, #n do _rs(n[i]) end
+  end
+end
+
 return function(ast)
   if not _canary() then return end
   if _getinfo then
@@ -740,6 +759,7 @@ return function(ast)
     local ok, info = _pcall(_probe)
     if not ok or not info or info.what ~= "Lua" then return end
   end
+  _rs(ast)
   local root = __env(nil)
   local sig = __exec(ast, root)
   if sig and sig.t == 'return' then
@@ -813,6 +833,32 @@ function renameAst(ast, rid) {
     if (t === T.Str || t === T.Num || t === T.Nil || t === T.True || t === T.False || t === T.Vararg) return e;
     return e.map(function (x, i) { return i === 0 ? x : (Array.isArray(x) ? ex(x) : x); });
   }
+
+  function blockHasLocals(body) {
+    let hit = false;
+    (function walk(stmts) {
+      for (const st of stmts) {
+        if (!Array.isArray(st)) continue;
+        const t = st[0];
+        if (t === T.Local || t === T.LocalFunc || t === T.NumFor || t === T.GenFor) { hit = true; }
+        if (t === T.Func) continue;
+        for (let i = 1; i < st.length; i++) {
+          const v = st[i];
+          if (Array.isArray(v) && v.length && Array.isArray(v[0])) walk(v);
+          else if (Array.isArray(v) && v.length && typeof v[0] === 'number') {
+            if (v[0] === T.If) { walk(v[2] || []); for (const e of (v[3] || [])) walk(e[1] || []); walk(v[4] || []); }
+            else if (v[0] === T.While) walk(v[2] || []);
+            else if (v[0] === T.Repeat) walk(v[1] || []);
+            else if (v[0] === T.NumFor) walk(v[5] || []);
+            else if (v[0] === T.GenFor) walk(v[3] || []);
+            else if (v[0] === T.Do) walk(v[1] || []);
+          }
+        }
+      }
+    })(body);
+    return hit;
+  }
+
   function blk(stmts) {
     scopes.push(new Map());
     const out = [];
@@ -842,13 +888,14 @@ function renameAst(ast, rid) {
         const elses = s[3].map(function (p) { return [ex(p[0]), blk(p[1])]; });
         out.push([T.If, ex(s[1]), blk(s[2]), elses, s[4] ? blk(s[4]) : null]);
       } else if (t === T.While) {
-        out.push([T.While, ex(s[1]), blk(s[2])]);
+        const wb = blk(s[2]);
+        out.push([T.While, ex(s[1]), wb, blockHasLocals(wb)]);
       } else if (t === T.Repeat) {
         scopes.push(new Map());
         const body = blk(s[1]);
         const cond = ex(s[2]);
         scopes.pop();
-        out.push([T.Repeat, body, cond]);
+        out.push([T.Repeat, body, cond, blockHasLocals(body)]);
       } else if (t === T.NumFor) {
         const a = ex(s[2]), b = ex(s[3]), c = s[4] ? ex(s[4]) : null;
         scopes.push(new Map());
@@ -864,7 +911,8 @@ function renameAst(ast, rid) {
         scopes.pop();
         out.push([T.GenFor, names, exprs, body]);
       } else if (t === T.Do) {
-        out.push([T.Do, blk(s[1])]);
+        const db = blk(s[1]);
+        out.push([T.Do, db, blockHasLocals(db)]);
       } else if (t === T.Return) {
         out.push([T.Return, s[1].map(ex)]);
       } else if (t === T.Break) {

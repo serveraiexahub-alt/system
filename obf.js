@@ -220,16 +220,28 @@ const LEVELS = {
   3: { layers: 3, junk: 8,   decoys: 60,  junkMul: 8,   strings: true, numbers: true, rename: true, fakes: 1 },
   4: { layers: 4, junk: 15,  decoys: 120, junkMul: 15,  strings: true, numbers: true, rename: true, fakes: 2 },
   5: { layers: 5, junk: 25,  decoys: 200, junkMul: 25,  strings: true, numbers: true, rename: true, fakes: 3 },
-  6: { layers: 6, junk: 40,  decoys: 300, junkMul: 40,  strings: true, numbers: true, rename: true, fakes: 3, shard: true }
+  6: { layers: 6, junk: 14,  decoys: 90,  junkMul: 14,  strings: true, numbers: true, rename: true, fakes: 3, shard: true }
+};
+
+// junk size presets (premium pick): small is fast, large is heaviest
+const JUNK_PRESETS = {
+  small:  { junkMul: 4,  decoys: 30,  packRounds: 2 },
+  medium: { junkMul: 14, decoys: 90,  packRounds: 2 },
+  large:  { junkMul: 40, decoys: 300, packRounds: 3 }
 };
 
 function luaObfuscate(source, options) {
   const opts = options || {};
-  const lv = LEVELS[Math.max(1, Math.min(5, Number(opts.level) || 3))];
+  let junkPreset = null;
+  if (opts.junkSize && JUNK_PRESETS[opts.junkSize]) junkPreset = JUNK_PRESETS[opts.junkSize];
+  const lv = LEVELS[Math.max(1, Math.min(6, Number(opts.level) || 3))];
   const o = Object.assign({
     strings: lv.strings, numbers: lv.numbers, rename: lv.rename,
     junk: true, wrap: true, hideErrors: true, seed: Date.now(),
-    layers: lv.layers, junkSize: lv.junk, decoys: lv.decoys, junkMul: lv.junkMul, fakes: lv.fakes || 0, remote: false
+    layers: lv.layers, junkSize: lv.junk, decoys: lv.decoys, junkMul: lv.junkMul, fakes: lv.fakes || 0, remote: false,
+    packRounds: junkPreset ? junkPreset.packRounds : undefined,
+    junkMul: junkPreset ? junkPreset.junkMul : lv.junkMul,
+    decoys: junkPreset ? junkPreset.decoys : lv.decoys
   }, opts);
   const rnd = rngFactory(o.seed || 1);
   const toks = lexLua(source);
@@ -607,7 +619,7 @@ function luaObfuscate(source, options) {
     if (vmCode) {
       let packed = vmCode;
       let prev = -1;
-      const packRounds = Number(o.level) >= 6 ? 3 : 2;
+      const packRounds = Number(o.packRounds) || 2;
       for (let li = 0; li < packRounds; li++) {
         const p2 = packBlob(packed, rnd, o.hideErrors && li === 1, rid, prev, li === 1 ? 0 : undefined);
         packed = p2.code;
@@ -623,7 +635,7 @@ function luaObfuscate(source, options) {
       return {
         code: out,
         vault: null,
-        stats: { strings: 0, original: source.length, output: out.length, decoys: 0, junk: Math.max(0, out.length - packed.length), fullVm: true }
+        stats: { strings: 0, original: source.length, output: out.length, decoys: 0, junk: Math.max(0, out.length - packed.length), fullVm: true, warn: out.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' }
       };
     }
   }
@@ -683,7 +695,7 @@ function luaObfuscate(source, options) {
     var junkChars = built.code.length;
   }
 
-  return { code: result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0), fullVm: false, vmFallback: o.vmFallback || '' } };
+  return { code: result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0), fullVm: false, vmFallback: o.vmFallback || '', warn: result.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' } };
 }
 
 
