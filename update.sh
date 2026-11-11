@@ -25,10 +25,16 @@ else
   echo "[3/4] node_modules ok"
 fi
 
-echo "[4/4] restart"
+echo "[4/4] restart web + bot"
+pkill -f "run-web.sh" 2>/dev/null || true
+pkill -f "run-bot.sh" 2>/dev/null || true
 pkill -f "node server.js" 2>/dev/null || true
+pkill -f "node bot.js" 2>/dev/null || true
+rm -f bot.lock
 sleep 1
-nohup node server.js >> server.log 2>&1 &
-sleep 1
-echo "running pid $!"
-echo "log: $(pwd)/server.log"
+nohup ./run-web.sh >> server.log 2>&1 &
+nohup ./run-bot.sh >> bot.log 2>&1 &
+sleep 3
+echo "เว็บ: $(pgrep -f 'node server.js' >/dev/null && echo 'เปิดแล้ว' || echo 'ยังไม่ขึ้น — เช็ก server.log')"
+echo "บอท: $(pgrep -f 'node bot.js' >/dev/null && echo 'เปิดแล้ว' || echo 'ยังไม่ขึ้น — เช็ก bot.log')"
+echo "log: $(pwd)/server.log · $(pwd)/bot.log"
