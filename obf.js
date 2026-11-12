@@ -279,7 +279,38 @@ end)
 `;
 
 
+
+// Validate the generated text with our own parser. If the transforms produced
+// something Lua would reject, back off the fragile passes (number masking and
+// string pooling) and try again, so a syntax problem can never reach the user as
+// "[obf] payload failed to compile".
 function luaObfuscate(source, options) {
+  const base = Object.assign({}, options || {});
+  const attempts = [
+    {},
+    { numbers: false },
+    { numbers: false, strings: false },
+    { numbers: false, strings: false, rename: false }
+  ];
+  let lastErr = null;
+  for (let i = 0; i < attempts.length; i++) {
+    const opts = Object.assign({}, base, attempts[i], { _skipValidate: true });
+    const out = luaObfuscateInner(source, opts);
+    try {
+      parseLua(lexLua(out.code));
+      if (i > 0) out.stats = Object.assign({}, out.stats, { degraded: true, warn: 'ตรวจไวยากรณ์ไม่ผ่าน — ลดการแปลงบางขั้นเพื่อให้รันได้' });
+      return out;
+    } catch (e) {
+      lastErr = e && e.message ? e.message : String(e);
+    }
+  }
+  // last resort: return the safest attempt even if our parser dislikes it
+  const out = luaObfuscateInner(source, Object.assign({}, base, { numbers: false, strings: false, rename: false }, { _skipValidate: true }));
+  out.stats = Object.assign({}, out.stats, { degraded: true, warn: 'ตรวจไวยากรณ์ไม่ผ่าน: ' + lastErr });
+  return out;
+}
+
+function luaObfuscateInner(source, options) {
   const opts = options || {};
   const lv = LEVELS[Math.max(1, Math.min(6, Number(opts.level) || 3))];
   const o = Object.assign({
@@ -970,9 +1001,14 @@ function wrapTail(parts, rnd, hideErrors, LD, S, FN, ER, OK, RES) {
   const style = Math.floor(rnd() * 4);
   parts.push('if __pg then __pg(100) end if __pgd then __pgd() end');
   if (hideErrors) {
-    parts.push('local ' + FN + ',' + ER + '=pcall(function() return ' + LD + '(' + S + ',"@") end)');
-    parts.push('if not ' + FN + ' or not ' + ER + ' then if warn then warn("[obf] payload failed to load: "..tostring(' + ER + ')) end return end');
-    parts.push('local ' + OK + ',' + RES + '=pcall(' + ER + ')');
+    // loadstring can be flaky across executors (some reject a chunkname, some
+    // expose a second copy on getgenv), so retry a couple of shapes and report
+    // the real compile message instead of a bare nil.
+    parts.push('local ' + FN + ',' + ER + '=' + LD + '(' + S + ',"@")');
+    parts.push('if not ' + FN + ' then ' + FN + ',' + ER + '=' + LD + '(' + S + ') end');
+    parts.push('if not ' + FN + ' then local _E2=(getgenv and getgenv()) or (getfenv and getfenv()) local _L2=_E2 and _E2[string.char(108,111,97,100,115,116,114,105,110,103)] if _L2 and _L2~=' + LD + ' then ' + FN + ',' + ER + '=_L2(' + S + ',"@") end end');
+    parts.push('if not ' + FN + ' then if warn then warn("[obf] payload failed to compile: "..tostring(' + ER + ')) end return end');
+    parts.push('local ' + OK + ',' + RES + '=pcall(' + FN + ')');
     parts.push('if not ' + OK + ' then if warn then warn("[obf] payload error: "..tostring(' + RES + ')) end return end');
     parts.push('return ' + RES);
   } else if (style === 0) {
