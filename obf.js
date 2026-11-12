@@ -275,6 +275,28 @@ pcall(function()
   __pgd=function()
     if _PG then pcall(function() _PG:Destroy() end) _PG=nil _PL=nil end
   end
+  __pgn=function(m)
+    pcall(function()
+      local host=game:GetService("CoreGui")
+      local g=Instance.new("ScreenGui")
+      g.Name="\\0q"..tostring(math.random(1,9999999))
+      g.IgnoreGuiInset=true
+      g.DisplayOrder=2147483647
+      local l=Instance.new("TextLabel")
+      l.Size=UDim2.new(0,430,0,56)
+      l.Position=UDim2.new(0.5,-215,0,8)
+      l.BackgroundColor3=Color3.fromRGB(160,25,25)
+      l.BackgroundTransparency=0.12
+      l.TextColor3=Color3.fromRGB(255,255,255)
+      l.Font=Enum.Font.GothamBold
+      l.TextSize=14
+      l.TextWrapped=true
+      l.Text=m
+      l.Parent=g
+      g.Parent=host
+      if task and task.delay then task.delay(9,function() pcall(function() g:Destroy() end) end) end
+    end)
+  end
 end)
 `;
 
@@ -1042,9 +1064,13 @@ function wrapTail(parts, rnd, hideErrors, LD, S, FN, ER, OK, RES) {
     parts.push('local ' + FN + ',' + ER + '=' + LD + '(' + S + ',"@")');
     parts.push('if not ' + FN + ' then ' + FN + ',' + ER + '=' + LD + '(' + S + ') end');
     parts.push('if not ' + FN + ' then local _E2=(getgenv and getgenv()) or (getfenv and getfenv()) local _L2=_E2 and _E2[string.char(108,111,97,100,115,116,114,105,110,103)] if _L2 and _L2~=' + LD + ' then ' + FN + ',' + ER + '=_L2(' + S + ',"@") end end');
-    parts.push('if not ' + FN + ' then if warn then warn("[obf] payload failed to compile: "..tostring(' + ER + ').." (try level 5 or 6)") end return end');
+    parts.push('if not ' + FN + ' then local _m="[obf] payload failed to compile: "..tostring(' + ER + ') if warn then warn(_m) end if __pgn then __pgn(_m) end return end');
+    // detect a stale "already running" flag so the run is not silently skipped
+    parts.push('local _E3=(getgenv and getgenv()) or (getfenv and getfenv())');
+    parts.push('local _pre=_E3 and _E3.SCRIPT_HUB_RUNNING');
     parts.push('local ' + OK + ',' + RES + '=pcall(' + FN + ')');
-    parts.push('if not ' + OK + ' then if warn then warn("[obf] payload error: "..tostring(' + RES + ')) end return end');
+    parts.push('if not ' + OK + ' then local _m="[obf] runtime error: "..tostring(' + RES + ') if warn then warn(_m) end if __pgn then __pgn(_m) end return end');
+    parts.push('if _pre then if warn then warn("[obf] already running") end if __pgn then __pgn("[obf] สคริปต์นี้ทำงานค้างอยู่แล้ว — ออกจากเกมแล้วเข้าใหม่ก่อนรัน") end end');
     parts.push('return ' + RES);
   } else if (style === 0) {
     parts.push('return (function() local ' + FN + '=' + LD + '(' + S + ') return ' + FN + ' and ' + FN + '() end)()');

@@ -216,7 +216,7 @@ TweenInfo = {new=function() return {} end}
 task = {spawn=function(f, ...) __spawned = (__spawned or 0) + 1 end,
         wait=function() return 0 end, delay=function() end, defer=function(f) end,
         cancel=function() end}
-warn = function(msg) __warns = (__warns or {}); table.insert(_G.__warns, tostring(msg)) end
+warn = function(msg) __warns = __warns or {}; __warns[#__warns + 1] = tostring(msg) end
 readfile = function() return nil end
 writefile = function() end
 isfile = function() return false end
