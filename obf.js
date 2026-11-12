@@ -310,6 +310,37 @@ function luaObfuscate(source, options) {
   return out;
 }
 
+
+// Luau caps a function at 200 local registers ("Out of local registers ... exceeded
+// limit 200"). A big script already sits close to that, and packing keeps the body
+// as real Lua, so it can tip over. This counts the peak simultaneously-active
+// locals in the chunk to decide when the bytecode-VM path is the safer choice:
+// the VM stores the program as data, so it never allocates a register per local.
+function localPressure(source) {
+  let toks;
+  try { toks = lexLua(source).filter(function (t) { return t.t !== 'nl'; }); }
+  catch (e) { return 0; }
+  const stack = [0];
+  let peak = 0;
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.t !== 'kw') continue;
+    if (t.v === 'function' || t.v === 'do' || t.v === 'then' || t.v === 'repeat') stack.push(0);
+    else if (t.v === 'elseif' || t.v === 'else') { stack.pop(); stack.push(0); }
+    else if (t.v === 'end' || t.v === 'until') { if (stack.length > 1) stack.pop(); }
+    else if (t.v === 'local') {
+      let n = 1, j = i + 1;
+      if (toks[j] && toks[j].t === 'kw' && toks[j].v === 'function') { /* one name */ }
+      else { while (toks[j] && toks[j].t === 'name') { if (toks[j + 1] && toks[j + 1].t === 'op' && toks[j + 1].v === ',') { n++; j += 2; } else break; } }
+      stack[stack.length - 1] += n;
+      let sum = 0;
+      for (let k = 0; k < stack.length; k++) sum += stack[k];
+      if (sum > peak) peak = sum;
+    }
+  }
+  return peak;
+}
+
 function luaObfuscateInner(source, options) {
   const opts = options || {};
   const lv = LEVELS[Math.max(1, Math.min(6, Number(opts.level) || 3))];
@@ -691,7 +722,8 @@ function luaObfuscateInner(source, options) {
 
   let result = pre + body;
 
-  if (o.wrap && Number(o.level) >= 5 && !o.remote && process.env.FULL_VM !== '0') {
+  const heavyLocals = localPressure(source) > 150;
+  if (o.wrap && (Number(o.level) >= 5 || heavyLocals) && !o.remote && process.env.FULL_VM !== '0') {
     let vmCode = tryFullVM(source, rid);
     if (!vmCode) {
       const why = (function () {
@@ -705,7 +737,10 @@ function luaObfuscateInner(source, options) {
       let packed = vmCode;
       let prev = -1;
       const budgetVM = outputBudget(String(source).length);
-      let packRounds = Math.max(1, Math.min(3, Number(o.packRounds) || 2));
+      // a single packing round is enough cover for the light levels and keeps the
+      // VM output small, since the VM itself is the main protection
+      const wantRounds = Number(o.packRounds) || (Number(o.level) <= 2 ? 1 : 2);
+      let packRounds = Math.max(1, Math.min(3, wantRounds));
       while (packRounds > 1 && packed.length * Math.pow(2.0, packRounds) > budgetVM) packRounds--;
       for (let li = 0; li < packRounds; li++) {
         const p2 = packBlob(packed, rnd, o.hideErrors && li === 1, rid, prev, li === 1 ? 0 : undefined, { i: li, n: packRounds });
@@ -1007,7 +1042,7 @@ function wrapTail(parts, rnd, hideErrors, LD, S, FN, ER, OK, RES) {
     parts.push('local ' + FN + ',' + ER + '=' + LD + '(' + S + ',"@")');
     parts.push('if not ' + FN + ' then ' + FN + ',' + ER + '=' + LD + '(' + S + ') end');
     parts.push('if not ' + FN + ' then local _E2=(getgenv and getgenv()) or (getfenv and getfenv()) local _L2=_E2 and _E2[string.char(108,111,97,100,115,116,114,105,110,103)] if _L2 and _L2~=' + LD + ' then ' + FN + ',' + ER + '=_L2(' + S + ',"@") end end');
-    parts.push('if not ' + FN + ' then if warn then warn("[obf] payload failed to compile: "..tostring(' + ER + ')) end return end');
+    parts.push('if not ' + FN + ' then if warn then warn("[obf] payload failed to compile: "..tostring(' + ER + ').." (try level 5 or 6)") end return end');
     parts.push('local ' + OK + ',' + RES + '=pcall(' + FN + ')');
     parts.push('if not ' + OK + ' then if warn then warn("[obf] payload error: "..tostring(' + RES + ')) end return end');
     parts.push('return ' + RES);

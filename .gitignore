@@ -12,3 +12,4 @@ tests/.tmp_*
 tests/.luau_*
 tests/roblox/.case.lua
 tests/roblox/.obf*.lua
+tests/roblox/.locals*.lua
