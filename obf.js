@@ -231,6 +231,54 @@ function outputBudget(sourceLen) {
   return Math.min(2500000, Math.max(600000, Math.floor(sourceLen * 10)));
 }
 
+// Emitted once per pack layer: turns a byte value into a character through a
+// table instead of calling string.char for every decoded byte.
+const CH_HELPER = 'local CH={} for _i=0,255 do CH[_i]=string.char(_i) end ';
+let CURRENT_PG_BASE = 0;
+
+
+// Progress overlay: a small "NN%" label in the top-right of the screen while the
+// layers decode, and the decode loop yields so the game does not freeze.
+const PROGRESS_PRELUDE = `
+local _PG,_PL,_PGV
+pcall(function()
+  local host=game:GetService("CoreGui")
+  local sg=Instance.new("ScreenGui")
+  sg.Name="\\0p"..tostring(math.random(1,9999999))
+  sg.IgnoreGuiInset=true
+  sg.ResetOnSpawn=false
+  sg.DisplayOrder=2147483647
+  local lb=Instance.new("TextLabel")
+  lb.Size=UDim2.new(0,96,0,22)
+  lb.Position=UDim2.new(1,-104,0,8)
+  lb.BackgroundColor3=Color3.fromRGB(18,18,18)
+  lb.BackgroundTransparency=0.25
+  lb.TextColor3=Color3.fromRGB(255,255,255)
+  lb.Font=Enum.Font.GothamBold
+  lb.TextSize=13
+  lb.Text="0%"
+  lb.Parent=sg
+  sg.Parent=host
+  _PG,_PL=sg,lb
+end)
+pcall(function()
+  __pg=function(p)
+    if not _PL then return end
+    if p>100 then p=100 end
+    if not _PGV or p>_PGV then _PGV=p end
+    pcall(function() _PL.Text=tostring(_PGV).."%" end)
+  end
+  __pgy=function()
+    local t=task
+    if t and t.wait then pcall(t.wait,0) elseif wait then pcall(wait,0) end
+  end
+  __pgd=function()
+    if _PG then pcall(function() _PG:Destroy() end) _PG=nil _PL=nil end
+  end
+end)
+`;
+
+
 function luaObfuscate(source, options) {
   const opts = options || {};
   const lv = LEVELS[Math.max(1, Math.min(6, Number(opts.level) || 3))];
@@ -629,7 +677,7 @@ function luaObfuscate(source, options) {
       let packRounds = Math.max(1, Math.min(3, Number(o.packRounds) || 2));
       while (packRounds > 1 && packed.length * Math.pow(2.0, packRounds) > budgetVM) packRounds--;
       for (let li = 0; li < packRounds; li++) {
-        const p2 = packBlob(packed, rnd, o.hideErrors && li === 1, rid, prev, li === 1 ? 0 : undefined);
+        const p2 = packBlob(packed, rnd, o.hideErrors && li === 1, rid, prev, li === 1 ? 0 : undefined, { i: li, n: packRounds });
         packed = p2.code;
         prev = p2.scheme;
         if (packed.length > budgetVM) break;
@@ -643,7 +691,7 @@ function luaObfuscate(source, options) {
         if (built.code) out = built.code + ' return (function() ' + out + ' end)()';
       }
       return {
-        code: out,
+        code: PROGRESS_PRELUDE + out,
         vault: null,
         stats: { strings: 0, original: source.length, output: out.length, decoys: 0, junk: Math.max(0, out.length - packed.length), fullVm: true, warn: out.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' }
       };
@@ -661,7 +709,7 @@ function luaObfuscate(source, options) {
     for (let li = 0; li < layers; li++) {
       const isOuter = li === layers - 1;
       const force = isOuter ? (lvNum >= 4 ? 4 : (lvNum >= 3 ? 3 : undefined)) : undefined;
-      const packed = packBlob(result, rnd, o.hideErrors, rid, prev, force);
+      const packed = packBlob(result, rnd, o.hideErrors, rid, prev, force, { i: li, n: layers });
       if (packed.code.length > budget && li > 0) break;
       result = packed.code;
       prev = packed.scheme;
@@ -703,7 +751,7 @@ function luaObfuscate(source, options) {
     var junkChars = built.code.length;
   }
 
-  return { code: result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0), fullVm: false, vmFallback: o.vmFallback || '', warn: result.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' } };
+  return { code: PROGRESS_PRELUDE + result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0), fullVm: false, vmFallback: o.vmFallback || '', warn: result.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' } };
 }
 
 
@@ -920,6 +968,7 @@ function emitLoader(nm) {
 
 function wrapTail(parts, rnd, hideErrors, LD, S, FN, ER, OK, RES) {
   const style = Math.floor(rnd() * 4);
+  parts.push('if __pg then __pg(100) end if __pgd then __pgd() end');
   if (hideErrors) {
     parts.push('local ' + FN + ',' + ER + '=pcall(function() return ' + LD + '(' + S + ',"@") end)');
     parts.push('if not ' + FN + ' or not ' + ER + ' then if warn then warn("[obf] payload failed to load: "..tostring(' + ER + ')) end return end');
@@ -973,8 +1022,8 @@ function schemeA(src, rnd, hideErrors, rid) {
   });
   const p = [];
   const nm = names;
-  p.push('local ' + nm.A + '=string.char' + B62N);
-  p.push('local ' + nm.M + '={} for ' + nm.I + '=1,#' + nm.A + ' do ' + nm.M + '[' + nm.A + ':sub(' + nm.I + ',' + nm.I + ')]=' + nm.I + '-1 end');
+  p.push(CH_HELPER + 'if __pg then __pg(' + CURRENT_PG_BASE + ') end ' + 'local ' + nm.A + '=string.char' + B62N);
+  p.push('local ' + nm.M + '={} for ' + nm.I + '=1,#' + nm.A + ' do ' + nm.M + '[string.byte(' + nm.A + ',' + nm.I + ')]=' + nm.I + '-1 end');
   p.push('local ' + nm.BL + '={' + recs.map(function (r) { return '"' + r.blob + '"'; }).join(',') + '}');
   p.push('local ' + nm.LEN + '={' + recs.map(function (r) { return r.len; }).join(',') + '}');
   p.push('local ' + nm.K1 + '={' + recs.map(function (r) { return r.k1; }).join(',') + '}');
@@ -984,16 +1033,18 @@ function schemeA(src, rnd, hideErrors, rid) {
   p.push('local ' + nm.OUT + '={}');
   p.push('for ' + nm.C + '=1,#' + nm.BL + ' do');
   p.push('local ' + nm.V + '=' + nm.BL + '[' + nm.C + '] local ' + nm.I + '=1 local ' + nm.P + '=0 local ' + nm.Q + '={}');
+  p.push('local _pc=math.max(1,math.floor(#' + nm.V + '/24)) local _c=0');
   p.push('while ' + nm.I + '<=#' + nm.V + ' do');
-  const ch0 = nm.M + '[' + nm.V + ':sub(' + nm.I + ',' + nm.I + ')]';
-  const ch1 = nm.M + '[' + nm.V + ':sub(' + nm.I + '+1,' + nm.I + '+1)]';
-  const ch2 = nm.M + '[' + nm.V + ':sub(' + nm.I + '+2,' + nm.I + '+2)]';
+  const ch0 = nm.M + '[string.byte(' + nm.V + ',' + nm.I + ')]';
+  const ch1 = nm.M + '[string.byte(' + nm.V + ',' + nm.I + '+1)]';
+  const ch2 = nm.M + '[string.byte(' + nm.V + ',' + nm.I + '+2)]';
   p.push('local ' + nm.HX + '=' + ch0 + '*3844+' + ch1 + '*62+' + ch2);
   p.push('local ' + nm.B1 + '=math.floor(' + nm.HX + '/256) local ' + nm.B2 + '=' + nm.HX + '%256');
   p.push(nm.P + '=' + nm.P + '+1 ' + nm.Q + '[' + nm.P + ']=(' + nm.B1 + '-((' + nm.P + '*' + nm.K1 + '[' + nm.C + ']+' + nm.K2 + '[' + nm.C + '])%256))%256');
   p.push(nm.P + '=' + nm.P + '+1 ' + nm.Q + '[' + nm.P + ']=(' + nm.B2 + '-((' + nm.P + '*' + nm.K1 + '[' + nm.C + ']+' + nm.K2 + '[' + nm.C + '])%256))%256');
-  p.push(nm.I + '=' + nm.I + '+3 end');
-  p.push('local ' + nm.N + '={} for ' + nm.I + '=1,' + nm.LEN + '[' + nm.C + '] do ' + nm.N + '[' + nm.I + ']=string.char(' + nm.Q + '[' + nm.I + ']) end');
+  p.push(nm.I + '=' + nm.I + '+3');
+  p.push('_c=_c+1 if _c%_pc==0 then if __pg then __pg(' + (CURRENT_PG_BASE + 1) + '+math.min(15,math.floor(_c/_pc*15/24))) end if __pgy then __pgy() end end end');
+  p.push('local ' + nm.N + '={} for ' + nm.I + '=1,' + nm.LEN + '[' + nm.C + '] do ' + nm.N + '[' + nm.I + ']=CH[' + nm.Q + '[' + nm.I + ']] end');
   p.push(nm.OUT + '[' + nm.ORD + '[' + nm.C + ']]=table.concat(' + nm.N + ') end');
   p.push('local ' + nm.S + '=table.concat(' + nm.OUT + ')');
   p.push('if #' + nm.S + '~=' + numLit(ch.n, rnd) + ' then return end');
@@ -1021,12 +1072,20 @@ function schemeB(src, rnd, hideErrors, rid) {
   const hex = pairs.reverse().join('');
   const nm = loaderNames(rid);
   const p = [];
-  p.push('local ' + nm.V + '="' + hex + '"');
+  p.push(CH_HELPER + 'if __pg then __pg(' + CURRENT_PG_BASE + ') end ' + 'local ' + nm.V + '="' + hex + '"');
+  p.push('local HB={} for _d=48,57 do HB[_d]=_d-48 end for _d=97,102 do HB[_d]=_d-87 end for _d=65,70 do HB[_d]=_d-55 end');
   p.push('local ' + nm.I + '=0 local ' + nm.Q + '={}');
-  p.push('for ' + nm.C + '=#' + nm.V + ',2,-2 do');
+  p.push('local _seg=math.max(2,2*math.floor(#' + nm.V + '/24)) local _p=#' + nm.V + ' local _k=0');
+  p.push('while _p>=2 do');
+  p.push('local _e=math.max(2,_p-_seg+2)');
+  p.push('for ' + nm.C + '=_p,_e,-2 do');
   p.push(nm.I + '=' + nm.I + '+1');
-  p.push('local ' + nm.B1 + '=tonumber(' + nm.V + ':sub(' + nm.C + '-1,' + nm.C + '),16)');
-  p.push(nm.Q + '[' + nm.I + ']=string.char((' + nm.B1 + '-((' + nm.I + '*' + nm.I + '*' + k1 + '+' + nm.I + '*' + k2 + '+' + k3 + ')%256))%256)');
+  p.push('local _x,_y=string.byte(' + nm.V + ',' + nm.C + '-1,' + nm.C + ')');
+  p.push('local ' + nm.B1 + '=HB[_x]*16+HB[_y]');
+  p.push(nm.Q + '[' + nm.I + ']=CH[((' + nm.B1 + '-((' + nm.I + '*' + nm.I + '*' + k1 + '+' + nm.I + '*' + k2 + '+' + k3 + ')%256))%256)]');
+  p.push('end');
+  p.push('_p=_e-2 _k=_k+1');
+  p.push('if __pg then __pg(' + (CURRENT_PG_BASE + 1) + '+math.floor(_k*15/24)) end if __pgy then __pgy() end');
   p.push('end');
   p.push('local ' + nm.S + '=table.concat(' + nm.Q + ')');
   p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' then return end');
@@ -1051,10 +1110,16 @@ function schemeC(src, rnd, hideErrors, rid) {
   }
   const nm = loaderNames(rid);
   const p = [];
-  p.push('local ' + nm.V + '={' + arr.join(',') + '}');
+  p.push(CH_HELPER + 'if __pg then __pg(' + CURRENT_PG_BASE + ') end ' + 'local ' + nm.V + '={' + arr.join(',') + '}');
   p.push('local ' + nm.Q + '={}');
-  p.push('for ' + nm.I + '=1,#' + nm.V + ' do');
-  p.push(nm.Q + '[' + nm.I + ']=string.char((' + nm.V + '[' + nm.I + ']-((' + nm.I + '*' + nm.I + '*7+' + nm.I + '*' + k1 + '+' + k2 + ')%256))%256)');
+  p.push('local _seg=math.max(1,math.floor(#' + nm.V + '/24)) local _p=1 local _k=0');
+  p.push('while _p<=#' + nm.V + ' do');
+  p.push('local _e=math.min(#' + nm.V + ',_p+_seg-1)');
+  p.push('for ' + nm.I + '=_p,_e do');
+  p.push(nm.Q + '[' + nm.I + ']=CH[((' + nm.V + '[' + nm.I + ']-((' + nm.I + '*' + nm.I + '*7+' + nm.I + '*' + k1 + '+' + k2 + ')%256))%256)]');
+  p.push('end');
+  p.push('_p=_e+1 _k=_k+1');
+  p.push('if __pg then __pg(' + (CURRENT_PG_BASE + 1) + '+math.floor(_k*15/24)) end if __pgy then __pgy() end');
   p.push('end');
   p.push('local ' + nm.S + '=table.concat(' + nm.Q + ')');
   p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' and #' + nm.S + '~=' + numLit(n + 1, rnd) + ' then return end');
@@ -1108,7 +1173,7 @@ function schemeD(src, rnd, hideErrors, rid) {
   const decoyId = ids[2 + blocks.length];
 
   const p = [];
-  p.push('local ' + nm.BL + '={' + blocks.map(function (b) { return '{' + b.data.join(',') + '}'; }).join(',') + '}');
+  p.push(CH_HELPER + 'if __pg then __pg(' + CURRENT_PG_BASE + ') end ' + 'local ' + nm.BL + '={' + blocks.map(function (b) { return '{' + b.data.join(',') + '}'; }).join(',') + '}');
   p.push('local ' + nm.LEN + '={' + blocks.map(function (b) { return b.len; }).join(',') + '}');
   p.push('local ' + nm.ORD + '={' + blocks.map(function (b) { return b.off; }).join(',') + '}');
   p.push('local ' + nm.OUT + '={}');
@@ -1131,7 +1196,7 @@ function schemeD(src, rnd, hideErrors, rid) {
     L.push('local ' + nm.V + '=' + nm.D + '[((' + nm.I + '-1-' + nm.ORD + '[' + (bi + 1) + '])%' + b.len + ')+1]');
     L.push('local ' + nm.P + '=' + (b.start) + '+' + nm.I);
     L.push('local ' + nm.HX + '=((' + nm.V + '-(((' + nm.P + '*' + k1 + '+' + nm.P + '*' + nm.P + '*' + k2 + '+' + k3 + ')%256)))%256)');
-    L.push(nm.Q + '[' + nm.I + ']=string.char((' + nm.HX + '%16)*16+math.floor(' + nm.HX + '/16))');
+    L.push(nm.Q + '[' + nm.I + ']=CH[((' + nm.HX + '%16)*16+math.floor(' + nm.HX + '/16))]');
     L.push('end');
     L.push(nm.OUT + '[' + (bi + 1) + ']=table.concat(' + nm.Q + ')');
     L.push(nm.T + '=' + opaque);
@@ -1139,7 +1204,7 @@ function schemeD(src, rnd, hideErrors, rid) {
   });
 
   const hcD = hashCheckLines(nm, src);
-  const hashLua = 'local hh=0 for _i=1,#' + nm.S + ' do hh=(hh*31+string.byte(' + nm.S + ',_i))%65521 end ';
+  const hashLua = emitHash('hh', nm.S);
   branch.push('elseif ' + nm.T + '==' + endId + ' then ' +
     'for ' + nm.I + '=1,' + blocks.length + ' do ' + nm.S + '=' + nm.S + '..(' + nm.OUT + '[' + nm.I + '] or "") end ' +
     hashLua + 'if hh~=' + luaHash(src) + ' then ' + nm.T + '=0 elseif #' + nm.S + '~=' + numLit(n, rnd) + ' then ' + nm.T + '=0 else ' +
@@ -1348,13 +1413,22 @@ function schemeE(src, rnd, hideErrors, rid) {
 
 const SCHEMES = process.env.VM_ONLY === '1' ? [schemeE] : [schemeA, schemeB, schemeC, schemeD, schemeE];
 
-function packBlob(src, rnd, hideErrors, rid, avoid, forceIdx) {
-  let idx = (typeof forceIdx === 'number' && forceIdx >= 0 && forceIdx < SCHEMES.length)
-    ? forceIdx
-    : Math.floor(rnd() * SCHEMES.length);
-  if (SCHEMES.length > 1 && typeof forceIdx !== 'number') {
+function packBlob(src, rnd, hideErrors, rid, avoid, forceIdx, layerInfo) {
+  const LI = layerInfo || { i: 0, n: 1 };
+  const PG_BASE = Math.floor((LI.i / Math.max(1, LI.n)) * 92);
+  CURRENT_PG_BASE = PG_BASE;
+  // Schemes 3 and 4 decode through a multi-block pass and an opcode interpreter.
+  // They are the strongest but also the slowest by an order of magnitude, so for
+  // a big payload they would add seconds of load time for little extra cover.
+  const bigPayload = src.length > 120000;
+  const maxIdx = bigPayload ? 2 : SCHEMES.length - 1;
+  let idx;
+  if (typeof forceIdx === 'number' && forceIdx >= 0 && forceIdx <= maxIdx) idx = forceIdx;
+  else if (typeof forceIdx === 'number' && forceIdx > maxIdx) idx = Math.floor(rnd() * (maxIdx + 1));
+  else idx = Math.floor(rnd() * (maxIdx + 1));
+  if (maxIdx > 0 && typeof forceIdx !== 'number') {
     let guard = 0;
-    while (idx === avoid && guard++ < 12) idx = Math.floor(rnd() * SCHEMES.length);
+    while (idx === avoid && guard++ < 12) idx = Math.floor(rnd() * (maxIdx + 1));
   }
   const saltLen = 8 + Math.floor(rnd() * 24);
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -1372,10 +1446,38 @@ function luaHash(str) {
   return h;
 }
 
+
+// Rolling hash over UTF-8 bytes, matching luaHash(). Emitted as a chunked loop
+// because a string.byte call per byte dominates the load time of big scripts.
+function emitHash(varName, strExpr) {
+  const H = varName;
+  return 'local ' + H + '=0 local _i=1 local _n=#' + strExpr + ' ' +
+    'while _i+15<=_n do ' +
+    'local a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15,a16=string.byte(' + strExpr + ',_i,_i+15) ' +
+    H + '=(' + H + '*31+a1)%65521 ' +
+    H + '=(' + H + '*31+a2)%65521 ' +
+    H + '=(' + H + '*31+a3)%65521 ' +
+    H + '=(' + H + '*31+a4)%65521 ' +
+    H + '=(' + H + '*31+a5)%65521 ' +
+    H + '=(' + H + '*31+a6)%65521 ' +
+    H + '=(' + H + '*31+a7)%65521 ' +
+    H + '=(' + H + '*31+a8)%65521 ' +
+    H + '=(' + H + '*31+a9)%65521 ' +
+    H + '=(' + H + '*31+a10)%65521 ' +
+    H + '=(' + H + '*31+a11)%65521 ' +
+    H + '=(' + H + '*31+a12)%65521 ' +
+    H + '=(' + H + '*31+a13)%65521 ' +
+    H + '=(' + H + '*31+a14)%65521 ' +
+    H + '=(' + H + '*31+a15)%65521 ' +
+    H + '=(' + H + '*31+a16)%65521 ' +
+    '_i=_i+16 end ' +
+    'while _i<=_n do ' + H + '=(' + H + '*31+string.byte(' + strExpr + ',_i))%65521 _i=_i+1 end ';
+}
+
 function hashCheckLines(nm, src) {
   const expect = luaHash(src);
   return [
-    'local ' + nm.Q + '_h=0 for ' + nm.I + '=1,#' + nm.S + ' do ' + nm.Q + '_h=(' + nm.Q + '_h*31+string.byte(' + nm.S + ',' + nm.I + '))%65521 end',
+    emitHash(nm.Q + '_h', nm.S),
     'if ' + nm.Q + '_h~=' + expect + ' then return end'
   ];
 }

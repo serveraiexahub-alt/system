@@ -30,8 +30,12 @@ end
 SIGNAL.connect = SIGNAL.Connect
 local function newSignal() return setmetatable({handlers={}}, SIGNAL) end
 
+local ALLCLASSES = {}
+__ALLCLASSES = ALLCLASSES
 local INST = {}
 INST.__index = function(t, k)
+  local own = rawget(t, k)
+  if own ~= nil then return own end
   local raw = rawget(t, '_props')
   if raw and raw[k] ~= nil then return raw[k] end
   local m = INST.methods[k]
@@ -52,6 +56,7 @@ end
 INST.__newindex = function(t, k, v)
   rawset(t, '_props', rawget(t, '_props') or {})
   rawget(t, '_props')[k] = v
+  if k == 'Parent' then rawset(t, '_parent', v) end
 end
 INST.eventNames = {
   ['Activated']=true,
@@ -89,8 +94,19 @@ INST.eventNames = {
   ['MouseMoved']=true,
 }
 INST.methods = {
-  Destroy = function(self) self._destroyed = true end,
-  Remove = function(self) self._destroyed = true end,
+  Destroy = function(self)
+    -- Roblox Destroy removes descendants too
+    for _, e in ipairs(ALLCLASSES) do
+      local o = e.obj
+      local p2 = o and rawget(o, '_parent')
+      while p2 do
+        if p2 == self then o._destroyed = true break end
+        p2 = rawget(p2, '_parent')
+      end
+    end
+    rawset(self, '_destroyed', true)
+  end,
+  Remove = function(self) rawset(self, '_destroyed', true) end,
   FindFirstChild = function(self, name) return nil end,
   FindFirstChildOfClass = function(self, cls) return nil end,
   GetChildren = function(self) return {} end,
@@ -118,13 +134,11 @@ INST.methods = {
   TakeDamage = function(self) end,
 }
 INST.__tostring = function() return 'Instance' end
-
-local ALLCLASSES = {}
-__ALLCLASSES = ALLCLASSES
 local function newInstance(class)
   createdCount = createdCount + 1
-  ALLCLASSES[#ALLCLASSES+1] = tostring(class)
+  ALLCLASSES[#ALLCLASSES+1] = { class = tostring(class), obj = nil }
   local o = setmetatable({_props = {}, ClassName = class}, INST)
+  ALLCLASSES[#ALLCLASSES].obj = o
   if class == 'ScreenGui' or class == 'TextLabel' or class == 'Frame' or class == 'ImageLabel' then
     CREATED[#CREATED+1] = class
   end
@@ -135,7 +149,11 @@ __CREATED = CREATED
 __createdCount = function() return createdCount end
 
 -- Services
+local SERVICE_CACHE = {}
 local function service(name)
+  if SERVICE_CACHE[name] then return SERVICE_CACHE[name] end
+  local svc
+  svc = (function()
   if name == 'Players' then
     local lp = newInstance('Player')
     lp._props.Name = 'Tester'
@@ -167,6 +185,9 @@ local function service(name)
   if name == 'Lighting' then return newInstance('Lighting') end
   if name == 'ContentProvider' then return {PreloadAsync=function() end} end
   return newInstance(name)
+  end)()
+  SERVICE_CACHE[name] = svc
+  return svc
 end
 
 -- Executor-style environment: getgenv() returns a writable table whose reads

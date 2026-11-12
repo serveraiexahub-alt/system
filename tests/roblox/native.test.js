@@ -29,12 +29,17 @@ if (!fs.existsSync(LUAU)) {
 const mock = fs.readFileSync(path.join(dir, 'mock.lua'), 'utf8') + `
 
 function __report(tag)
-  local seen = {}
-  for _, c in ipairs(__ALLCLASSES) do seen[c] = (seen[c] or 0) + 1 end
+  local seen, live = {}, 0
+  for _, e in ipairs(__ALLCLASSES) do
+    if not (e.obj and e.obj._destroyed) then
+      live = live + 1
+      seen[e.class] = (seen[e.class] or 0) + 1
+    end
+  end
   local out = {}
   for c, n in pairs(seen) do out[#out+1] = tostring(c) .. 'x' .. n end
   table.sort(out)
-  print('REPORT instances=' .. tostring(__createdCount()) .. ' classes=' .. table.concat(out, ','))
+  print('REPORT instances=' .. tostring(live) .. ' classes=' .. table.concat(out, ','))
 end
 `;
 
