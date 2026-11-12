@@ -609,7 +609,10 @@ end
 
 __exec = function(stmts, env)
   __tick = (__tick or 0) + 1
-  if __tick % 4000 == 0 and not _canary() then return nil end
+  -- The canary is an anti-hook probe. It must never abort the program: returning
+  -- early here silently truncates the whole run on any environment whose
+  -- string/table helpers are wrapped, which looks like "the script did nothing".
+  if __tick % 4000 == 0 then _canary() end
   if __tick % 1500 == 0 then
     for k = 1, #__strcache do __strcache[k][4] = nil end
     __strcache = {}
@@ -755,11 +758,13 @@ local function _rs(n)
 end
 
 return function(ast)
-  if not _canary() then return end
+  -- Both probes below are hardening only. They used to return early when they
+  -- did not match, which made the script run and do nothing at all on executors
+  -- that wrap debug.getinfo or the string library. They now never block.
+  _canary()
   if _getinfo then
     local function _probe() return _getinfo(1, "S") end
-    local ok, info = _pcall(_probe)
-    if not ok or not info or info.what ~= "Lua" then return end
+    _pcall(_probe)
   end
   _rs(ast)
   local root = __env(nil)

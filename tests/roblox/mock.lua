@@ -231,3 +231,59 @@ time = os.time
 wait = function() return 0 end
 spawn = function(f) __spawned = (__spawned or 0) + 1 end
 delay = function(_, f) end
+
+
+-- deep snapshot of everything the script built, for differential testing
+local function __ser(v)
+  local t = type(v)
+  if t == 'string' or t == 'number' or t == 'boolean' then return tostring(v) end
+  if t ~= 'table' then return t end
+  if v.X ~= nil then
+    local x, y = v.X, v.Y
+    local function part(n)
+      if type(n) == 'table' then return tostring(n.Scale) .. ':' .. tostring(n.Offset) end
+      return tostring(n)
+    end
+    return part(x) .. '/' .. part(y)
+  end
+  if v.R ~= nil then return tostring(v.R) .. ',' .. tostring(v.G) .. ',' .. tostring(v.B) end
+  return '{t}'
+end
+
+local function __isProgress(o)
+  local cur = o
+  while cur do
+    local n = rawget(cur, '_props') and rawget(cur, '_props').Name
+    if type(n) == 'string' and n:sub(1, 2) == '\0p' then return true end
+    cur = rawget(cur, '_parent')
+  end
+  return false
+end
+
+function __snapshot()
+  local parts = {}
+  for i, e in ipairs(__ALLCLASSES) do
+    local o = e.obj
+    if o and not o._destroyed and not __isProgress(o) then
+      local props = {}
+      local raw = rawget(o, '_props')
+      for k, v in pairs(raw or {}) do
+        if k ~= 'Parent' and type(v) ~= 'function' then
+          local okp, sv = pcall(__ser, v)
+          if okp then props[#props+1] = k .. '=' .. sv end
+        end
+      end
+      table.sort(props)
+      local par = rawget(o, '_parent')
+      local pname = '-'
+      if type(par) == 'table' then
+        local pp = rawget(par, '_props') or {}
+        pname = tostring(pp.Name or '?')
+      end
+      parts[#parts+1] = e.class .. '<' .. pname .. '>' .. table.concat(props, ',')
+    end
+  end
+  table.sort(parts)
+  print('SNAP ' .. tostring(#parts))
+  for _, l in ipairs(parts) do print(l) end
+end
