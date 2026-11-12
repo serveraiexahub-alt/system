@@ -358,7 +358,9 @@ function toLua(value) {
 }
 
 const VM_RUNTIME = `
-local _G = (getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV
+-- Luau keeps _G as a sandbox table, not the globals, so the real environment
+-- must be resolved through getgenv/getfenv before _G is considered.
+local _G = (getgenv and getgenv()) or (getfenv and getfenv()) or _G or _ENV
 local _K = __KEY__
 local _M = {}
 for _i = 0, 31 do _M[_i] = (_i - _K) % 32 end
