@@ -223,6 +223,14 @@ const LEVELS = {
   6: { layers: 6, junk: 10,  decoys: 60,  junkMul: 10,  strings: true, numbers: true, rename: true, fakes: 3, shard: true }
 };
 
+
+// Total output budget: an executor will choke on multi-megabyte scripts, and a
+// truncated paste is the classic "it just does nothing" symptom. Keep the final
+// file within ~10x the source, with a floor so small scripts still get layers.
+function outputBudget(sourceLen) {
+  return Math.min(2500000, Math.max(600000, Math.floor(sourceLen * 10)));
+}
+
 function luaObfuscate(source, options) {
   const opts = options || {};
   const lv = LEVELS[Math.max(1, Math.min(6, Number(opts.level) || 3))];
@@ -617,14 +625,18 @@ function luaObfuscate(source, options) {
     if (vmCode) {
       let packed = vmCode;
       let prev = -1;
-      const packRounds = Number(o.packRounds) || 2;
+      const budgetVM = outputBudget(String(source).length);
+      let packRounds = Math.max(1, Math.min(3, Number(o.packRounds) || 2));
+      while (packRounds > 1 && packed.length * Math.pow(2.0, packRounds) > budgetVM) packRounds--;
       for (let li = 0; li < packRounds; li++) {
         const p2 = packBlob(packed, rnd, o.hideErrors && li === 1, rid, prev, li === 1 ? 0 : undefined);
         packed = p2.code;
         prev = p2.scheme;
+        if (packed.length > budgetVM) break;
       }
       const mul = Math.max(0, Number(o.junkMul) || 0);
-      const target = Math.min(400000, Math.floor(String(source).length * mul));
+      const roomVm = Math.max(0, budgetVM - packed.length);
+      const target = Math.min(roomVm, Math.min(400000, Math.floor(String(source).length * mul)));
       let out = packed;
       if (target > 0) {
         const built = buildJunkToSize(rnd, rid, target, Math.max(0, Number(o.decoys) || 0));
@@ -640,19 +652,17 @@ function luaObfuscate(source, options) {
 
   if (o.wrap) {
     let layers = Math.max(1, Math.min(8, Number(o.layers) || 1));
-    const srcBytes = source.length;
-    let budget = 8000000;
-    for (let li = 0; li < layers; li++) {
-      const need = Math.ceil(srcBytes * (o.remote ? 3 : 1.7));
-      if (need > budget) { layers = Math.max(1, li); break; }
-      budget -= need;
-    }
+    const srcBytes = String(source).length;
+    const budget = outputBudget(srcBytes);
+    // each pack layer roughly triples the size; drop layers until the estimate fits
+    while (layers > 1 && srcBytes * Math.pow(3.0, layers) > budget) layers--;
     let prev = -1;
     const lvNum = Number(o.level) || 1;
     for (let li = 0; li < layers; li++) {
       const isOuter = li === layers - 1;
       const force = isOuter ? (lvNum >= 4 ? 4 : (lvNum >= 3 ? 3 : undefined)) : undefined;
       const packed = packBlob(result, rnd, o.hideErrors, rid, prev, force);
+      if (packed.code.length > budget && li > 0) break;
       result = packed.code;
       prev = packed.scheme;
     }
@@ -662,7 +672,7 @@ function luaObfuscate(source, options) {
   const minDecoys = Math.max(0, Math.min(400, Number(o.decoys) || 0));
   if (mul > 0 || minDecoys > 0) {
     const baseLen = String(source).length;
-    const room = Math.max(0, 8500000 - result.length);
+    const room = Math.max(0, outputBudget(baseLen) - result.length);
     const targetChars = Math.min(room, Math.min(400000, Math.floor(baseLen * mul)));
     const built = buildJunkToSize(rnd, rid, targetChars, minDecoys);
     if (built.code) {
@@ -892,13 +902,29 @@ function shuffleOrder(rnd, count) {
   return order;
 }
 
+
+// Emit a loader lookup that works on executors, plain Lua and Luau.
+// Luau has no getfenv and no _ENV, and getgenv() may not expose loadstring,
+// so every plausible source is tried and a visible warning is emitted when
+// none of them work (silently returning is what made scripts look dead).
+function emitLoader(nm) {
+  const LD = nm.LD;
+  return 'local ' + LD + '=string.char(108,111,97,100,115,116,114,105,110,103) ' +
+    'local _e1=getgenv and getgenv() ' +
+    'local _e2=getfenv and getfenv() ' +
+    LD + '=(_e1 and _e1[' + LD + ']) or (_e2 and _e2[' + LD + ']) or ' +
+    '(_G and _G[' + LD + ']) or loadstring or load ' +
+    'if not ' + LD + ' then if warn then warn(' +
+      '"[obf] this executor has no loadstring") end return end ';
+}
+
 function wrapTail(parts, rnd, hideErrors, LD, S, FN, ER, OK, RES) {
   const style = Math.floor(rnd() * 4);
   if (hideErrors) {
     parts.push('local ' + FN + ',' + ER + '=pcall(function() return ' + LD + '(' + S + ',"@") end)');
-    parts.push('if not ' + FN + ' or not ' + ER + ' then return end');
+    parts.push('if not ' + FN + ' or not ' + ER + ' then if warn then warn("[obf] payload failed to load: "..tostring(' + ER + ')) end return end');
     parts.push('local ' + OK + ',' + RES + '=pcall(' + ER + ')');
-    parts.push('if not ' + OK + ' then return end');
+    parts.push('if not ' + OK + ' then if warn then warn("[obf] payload error: "..tostring(' + RES + ')) end return end');
     parts.push('return ' + RES);
   } else if (style === 0) {
     parts.push('return (function() local ' + FN + '=' + LD + '(' + S + ') return ' + FN + ' and ' + FN + '() end)()');
@@ -973,8 +999,8 @@ function schemeA(src, rnd, hideErrors, rid) {
   p.push('if #' + nm.S + '~=' + numLit(ch.n, rnd) + ' then return end');
   const hcA = hashCheckLines(nm, src);
   p.push(hcA[0]); p.push(hcA[1]);
-  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=(getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV');
-  p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
+  p.push(emitLoader(nm));
+  p.push('');
   wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
   return p.join(' ');
 }
@@ -1006,8 +1032,8 @@ function schemeB(src, rnd, hideErrors, rid) {
   p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' then return end');
   const hcB = hashCheckLines(nm, src);
   p.push(hcB[0]); p.push(hcB[1]);
-  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=(getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV');
-  p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
+  p.push(emitLoader(nm));
+  p.push('');
   wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
   return p.join(' ');
 }
@@ -1034,8 +1060,8 @@ function schemeC(src, rnd, hideErrors, rid) {
   p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' and #' + nm.S + '~=' + numLit(n + 1, rnd) + ' then return end');
   const hcC = hashCheckLines(nm, src);
   p.push(hcC[0]); p.push(hcC[1]);
-  p.push('local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=(getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV');
-  p.push(nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)]');
+  p.push(emitLoader(nm));
+  p.push('');
   wrapTail(p, rnd, hideErrors, nm.LD, nm.S, nm.FN, nm.ER, nm.OK, nm.RES);
   return p.join(' ');
 }
@@ -1117,8 +1143,7 @@ function schemeD(src, rnd, hideErrors, rid) {
   branch.push('elseif ' + nm.T + '==' + endId + ' then ' +
     'for ' + nm.I + '=1,' + blocks.length + ' do ' + nm.S + '=' + nm.S + '..(' + nm.OUT + '[' + nm.I + '] or "") end ' +
     hashLua + 'if hh~=' + luaHash(src) + ' then ' + nm.T + '=0 elseif #' + nm.S + '~=' + numLit(n, rnd) + ' then ' + nm.T + '=0 else ' +
-    'local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=(getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV ' +
-    nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)] ' +
+    emitLoader(nm) +
     'local ' + nm.RES + '=' + nm.LD + '(' + nm.S + ') if not ' + nm.RES + ' then ' + nm.T + '=0 else ' +
     'return ' + nm.RES + '() end end');
 
@@ -1311,7 +1336,7 @@ function schemeE(src, rnd, hideErrors, rid) {
   p.push('elseif ' + nm.I + '==' + op('JMP') + ' then ' + nm.P + '=' + nm.HX);
   p.push('elseif ' + nm.I + '==' + op('JGT') + ' then if ' + nm.OUT + '[' + nm.HX + ']>' + nm.OUT + '[' + nm.T + '] then ' + nm.P + '=' + nm.G + ' end');
   p.push('elseif ' + nm.I + '==' + op('CONCAT') + ' then ' + nm.OUT + '[' + nm.HX + ']=table.concat(' + nm.OUT + '[' + nm.T + '] or {})');
-  p.push('elseif ' + nm.I + '==' + op('CALL') + ' then local ' + nm.LD + '=string.char(108,111,97,100,115,116,114,105,110,103) local ' + nm.G + '=(getgenv and getgenv()) or _G or (getfenv and getfenv()) or _ENV ' + nm.LD + '=' + nm.G + '[' + nm.LD + '] or ' + nm.G + '[string.char(108,111,97,100)] ' + nm.OUT + '[' + nm.HX + ']=' + nm.LD + '(' + nm.OUT + '[' + nm.T + '])');
+  p.push('elseif ' + nm.I + '==' + op('CALL') + ' then ' + emitLoader(nm) + nm.OUT + '[' + nm.HX + ']=' + nm.LD + '(' + nm.OUT + '[' + nm.T + '])');
   p.push('elseif ' + nm.I + '==' + op('RET') + ' then return ' + nm.OUT + '[' + nm.HX + ']');
   p.push('elseif ' + nm.I + '==' + op('RUN') + ' then local ' + nm.FN + '=' + nm.OUT + '[' + nm.HX + '] if type(' + nm.FN + ')=="function" then return ' + nm.FN + '() end return ' + nm.FN);
   p.push('elseif ' + nm.I + '==' + op('SLICE') + ' then ' + nm.OUT + '[' + nm.HX + ']=string.sub(' + nm.OUT + '[' + nm.T + '],1,' + nm.OUT + '[' + nm.G + '])');
