@@ -29,7 +29,8 @@ for (const lv of [1, 2, 3, 4, 5, 6]) {
   const out = luaObfuscate(src, { level: lv, seed: 91 });
   fs.writeFileSync(f, out.code);
   const r = spawnSync(LUAU, [f], { encoding: 'utf8', timeout: 120000 });
-  const got = (String(r.stdout || '') + String(r.stderr || '')).trim().split('\n')[0];
+  const got = (String(r.stdout || '') + String(r.stderr || ''))
+    .split('\n').filter(function (l) { return l.indexOf('[obf]') !== 0; }).join('\n').trim().split('\n')[0];
   if (got !== want) { fail++; console.log('FAIL L' + lv, 'got=' + JSON.stringify(got.slice(0, 90))); }
 }
 console.log('LOCALS ' + (total - fail) + '/' + total + (fail ? ' FAILED' : ' OK') + '  (230 locals)');

@@ -254,7 +254,7 @@ local function __isProgress(o)
   local cur = o
   while cur do
     local n = rawget(cur, '_props') and rawget(cur, '_props').Name
-    if type(n) == 'string' and n:sub(1, 2) == '\0p' then return true end
+    if type(n) == 'string' and (n:sub(1, 11) == 'pgoverlay_' or n:sub(1, 2) == '\0q') then return true end
     cur = rawget(cur, '_parent')
   end
   return false

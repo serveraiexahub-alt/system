@@ -33,7 +33,8 @@ for (const [name, src] of variants) {
     const f = '/tmp/_bom_case.lua';
     fs.writeFileSync(f, luaObfuscate(src, { level: lv, seed: 21 }).code);
     const r = spawnSync(LUAU, [f], { encoding: 'utf8', timeout: 120000 });
-    const got = (String(r.stdout || '') + String(r.stderr || '')).trim().split('\n')[0];
+    const got = (String(r.stdout || '') + String(r.stderr || ''))
+      .split('\n').filter(function (l) { return l.indexOf('[obf]') !== 0; }).join('\n').trim().split('\n')[0];
     if (got !== want) { fail++; console.log('FAIL', name, 'L' + lv, 'got=' + JSON.stringify(got.slice(0, 60))); }
   }
 }

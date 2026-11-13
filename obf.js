@@ -219,7 +219,7 @@ const LEVELS = {
   2: { layers: 2, junk: 2.5, decoys: 14,  junkMul: 2.5, strings: true, numbers: true, rename: true },
   3: { layers: 3, junk: 8,   decoys: 60,  junkMul: 8,   strings: true, numbers: true, rename: true, fakes: 1 },
   4: { layers: 4, junk: 15,  decoys: 120, junkMul: 15,  strings: true, numbers: true, rename: true, fakes: 2 },
-  5: { layers: 5, junk: 25,  decoys: 200, junkMul: 25,  strings: true, numbers: true, rename: true, fakes: 3 },
+  5: { layers: 6, junk: 30,  decoys: 320, junkMul: 12,  strings: true, numbers: true, rename: true, fakes: 3 },
   6: { layers: 6, junk: 10,  decoys: 60,  junkMul: 10,  strings: true, numbers: true, rename: true, fakes: 3, shard: true }
 };
 
@@ -234,6 +234,10 @@ function outputBudget(sourceLen) {
 // Emitted once per pack layer: turns a byte value into a character through a
 // table instead of calling string.char for every decoded byte.
 const CH_HELPER = 'local CH={} for _i=0,255 do CH[_i]=string.char(_i) end ';
+// every layer draws its names from its own prefix, so no two layers share
+// a variable name and a reader cannot follow one name across layers
+const LAYER_PREFIX = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+let CURRENT_LAYER_PREFIX = '';
 let CURRENT_PG_BASE = 0;
 
 
@@ -244,7 +248,7 @@ local _PG,_PL,_PGV
 pcall(function()
   local host=game:GetService("CoreGui")
   local sg=Instance.new("ScreenGui")
-  sg.Name="\\0p"..tostring(math.random(1,9999999))
+  sg.Name="pgoverlay_"..tostring(math.random(1,9999999))
   sg.IgnoreGuiInset=true
   sg.ResetOnSpawn=false
   sg.DisplayOrder=2147483647
@@ -260,6 +264,7 @@ pcall(function()
   lb.Parent=sg
   sg.Parent=host
   _PG,_PL=sg,lb
+  if task and task.delay then task.delay(25,function() pcall(function() if sg then sg:Destroy() end end) end) end
 end)
 pcall(function()
   __pg=function(p)
@@ -277,24 +282,24 @@ pcall(function()
   end
   __pgn=function(m)
     pcall(function()
-      local host=game:GetService("CoreGui")
-      local g=Instance.new("ScreenGui")
-      g.Name="\\0q"..tostring(math.random(1,9999999))
-      g.IgnoreGuiInset=true
-      g.DisplayOrder=2147483647
-      local l=Instance.new("TextLabel")
-      l.Size=UDim2.new(0,430,0,56)
-      l.Position=UDim2.new(0.5,-215,0,8)
-      l.BackgroundColor3=Color3.fromRGB(160,25,25)
-      l.BackgroundTransparency=0.12
-      l.TextColor3=Color3.fromRGB(255,255,255)
-      l.Font=Enum.Font.GothamBold
-      l.TextSize=14
-      l.TextWrapped=true
-      l.Text=m
-      l.Parent=g
-      g.Parent=host
-      if task and task.delay then task.delay(9,function() pcall(function() g:Destroy() end) end) end
+      local hostN=game:GetService("CoreGui")
+      local sgN=Instance.new("ScreenGui")
+      sgN.Name="pgnotice_"..tostring(math.random(1,9999999))
+      sgN.IgnoreGuiInset=true
+      sgN.DisplayOrder=2147483647
+      local lbN=Instance.new("TextLabel")
+      lbN.Size=UDim2.new(0,430,0,56)
+      lbN.Position=UDim2.new(0.5,-215,0,8)
+      lbN.BackgroundColor3=Color3.fromRGB(160,25,25)
+      lbN.BackgroundTransparency=0.12
+      lbN.TextColor3=Color3.fromRGB(255,255,255)
+      lbN.Font=Enum.Font.GothamBold
+      lbN.TextSize=14
+      lbN.TextWrapped=true
+      lbN.Text=m
+      lbN.Parent=sgN
+      sgN.Parent=hostN
+      if task and task.delay then task.delay(9,function() pcall(function() sgN:Destroy() end) end) end
     end)
   end
 end)
@@ -447,7 +452,7 @@ function luaObfuscateInner(source, options) {
     for (let tries = 0; tries < 60; tries++) {
       const maxLen = tries < 20 ? 2 : (tries < 40 ? 3 : 5);
       const len = 1 + Math.floor(rnd() * maxLen);
-      let out = '';
+      let out = CURRENT_LAYER_PREFIX;
       for (let i = 0; i < len; i++) out += ridChars[Math.floor(rnd() * ridChars.length)];
       if (usedNames.has(out)) continue;
       if (LUA_KW[out]) continue;
@@ -1077,10 +1082,12 @@ function wrapTail(parts, rnd, hideErrors, LD, S, FN, ER, OK, RES) {
     parts.push('if not ' + FN + ' then local _E2=(getgenv and getgenv()) or (getfenv and getfenv()) local _L2=_E2 and _E2[string.char(108,111,97,100,115,116,114,105,110,103)] if _L2 and _L2~=' + LD + ' then ' + FN + ',' + ER + '=_L2(' + S + ',"@") end end');
     parts.push('if not ' + FN + ' then local _m="[obf] payload failed to compile: "..tostring(' + ER + ') if warn then warn(_m) end if __pgn then __pgn(_m) end return end');
     // detect a stale "already running" flag so the run is not silently skipped
+    parts.push('if print then pcall(print,"[obf] running") end');
     parts.push('local _E3=(getgenv and getgenv()) or (getfenv and getfenv())');
     parts.push('local _pre=_E3 and _E3.SCRIPT_HUB_RUNNING');
     parts.push('local ' + OK + ',' + RES + '=pcall(' + FN + ')');
     parts.push('if not ' + OK + ' then local _m="[obf] runtime error: "..tostring(' + RES + ') if warn then warn(_m) end if __pgn then __pgn(_m) end return end');
+    parts.push('if print then pcall(print,"[obf] finished") end');
     parts.push('if _pre then if warn then warn("[obf] already running") end if __pgn then __pgn("[obf] สคริปต์นี้ทำงานค้างอยู่แล้ว — ออกจากเกมแล้วเข้าใหม่ก่อนรัน") end end');
     parts.push('return ' + RES);
   } else if (style === 0) {
@@ -1525,6 +1532,7 @@ function packBlob(src, rnd, hideErrors, rid, avoid, forceIdx, layerInfo) {
   const LI = layerInfo || { i: 0, n: 1 };
   const PG_BASE = Math.floor((LI.i / Math.max(1, LI.n)) * 92);
   CURRENT_PG_BASE = PG_BASE;
+  CURRENT_LAYER_PREFIX = LAYER_PREFIX[(LI.i || 0) % LAYER_PREFIX.length];
   // Schemes 3 and 4 decode through a multi-block pass and an opcode interpreter.
   // They are the strongest but also the slowest by an order of magnitude, so for
   // a big payload they would add seconds of load time for little extra cover.

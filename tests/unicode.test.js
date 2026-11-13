@@ -20,8 +20,9 @@ for (const [name, src] of samples) {
     total++;
     fs.writeFileSync('tests/.tmp_out.lua', luaObfuscate(src, { level: lv, seed: 3 }).code);
     let got = '';
-    try { got = execSync('timeout 60 lua5.1 tests/runlua.lua tests/.tmp_out.lua', { encoding: 'utf8' }).trim(); }
-    catch (e) { got = (String(e.stdout || '') + String(e.stderr || '')).trim(); }
+    try { got = execSync('timeout 60 lua5.1 tests/runlua.lua tests/.tmp_out.lua', { encoding: 'utf8' }); }
+    catch (e) { got = String(e.stdout || '') + String(e.stderr || ''); }
+    got = got.split('\n').filter(function (l) { return l.indexOf('[obf]') !== 0; }).join('\n').trim();
     if (got !== want) { fail++; console.log('FAIL', name, 'L' + lv, 'got=' + JSON.stringify(got).slice(0, 60), 'want=' + JSON.stringify(want)); }
   }
 }

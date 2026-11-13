@@ -38,7 +38,8 @@ function run(code) {
   const f = path.join(dir, '.canary_run.lua');
   fs.writeFileSync(f, MOCK + '\nlocal ok,err=pcall(function()\n' + code + '\nend)\nprint("R", tostring(ok), tostring(err or ""))');
   const r = spawnSync(LUAU, [f], { encoding: 'utf8', timeout: 120000 });
-  return (String(r.stdout || '') + String(r.stderr || '')).trim().split('\n');
+  return (String(r.stdout || '') + String(r.stderr || ''))
+    .split('\n').filter(function (l) { return l.indexOf('[obf]') !== 0; });
 }
 
 const normal = run(fs.readFileSync(payload, 'utf8'));
