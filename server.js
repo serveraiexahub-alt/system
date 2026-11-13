@@ -1076,9 +1076,18 @@ app.get('/api/obf/usage', auth, function (req, res) {
   res.json({ used: q.used, left: q.left, limit: q.limit, day: q.day, premium: isPremium(u), max: isMax(u), admin: isAdmin(u), maxLevel: isAdmin(u) ? 6 : (isMax(u) ? 6 : (isPremium(u) ? Math.min(PREMIUM_LEVELS, 5) : PREMIUM_FREE_LEVEL)) });
 });
 
+
+// Strip a UTF-8 BOM before anything touches the code. Uploaded files and
+// Windows-edited files often carry one, and a BOM is not valid Lua: it made the
+// VM path bail out and levels 1-4 fall back to packing a body that was already
+// at the 200 local-register ceiling.
+function cleanCode(v) {
+  return String(v == null ? '' : v).replace(/^\uFEFF/, '').replace(/^\uFFFE/, '');
+}
+
 app.post('/api/obfuscate', auth, function (req, res) {
   const body = req.body || {};
-  const code = String(body.code == null ? '' : body.code);
+  const code = cleanCode(body.code);
   const fileName = String(body.name || '').trim();
   if (!code.trim()) return res.status(400).json({ error: 'Code is empty' });
   if (code.length > MAX_INPUT) return res.status(413).json({ error: 'Code too large (max 2 MB input)' });
@@ -1259,7 +1268,7 @@ app.put('/api/files/:id', auth, badKey, function (req, res) {
   if (!f || !canEdit(f, req.user)) return res.status(404).json({ error: 'File not found' });
   const body = req.body || {};
   const name = f.name;
-  const code = body.code !== undefined ? String(body.code) : f.code;
+  const code = body.code !== undefined ? cleanCode(body.code) : f.code;
   if (!name) return res.status(400).json({ error: 'File name is required' });
   if (name.length > MAX_NAME) return res.status(400).json({ error: 'File name too long' });
   const uLim = isPremium(ownGet(db.users, req.user.id)) ? MAX_CODE_PREMIUM : MAX_CODE;

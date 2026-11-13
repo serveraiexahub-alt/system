@@ -364,11 +364,22 @@ function localPressure(source) {
 }
 
 function luaObfuscateInner(source, options) {
+  // A UTF-8 BOM (or CRLF) arrives whenever a file is copied through Windows or
+  // uploaded from some editors. The BOM is not valid Lua, so without this the
+  // parser rejects the script, the VM path bails out and levels 1-4 fall back to
+  // packing a body that is already at the 200-local ceiling.
+  source = String(source == null ? '' : source)
+    .replace(/^\uFEFF/, '')
+    .replace(/^\uFFFE/, '');
   const opts = options || {};
+  // Inline junk inserts an extra local after every then/do/else/repeat. On a
+  // script that already sits at the 200 local-register ceiling that single extra
+  // local is what triggers "Out of local registers", so skip it there.
+  const heavySource = localPressure(source) > 150;
   const lv = LEVELS[Math.max(1, Math.min(6, Number(opts.level) || 3))];
   const o = Object.assign({
     strings: lv.strings, numbers: lv.numbers, rename: lv.rename,
-    junk: true, wrap: true, hideErrors: true, seed: Date.now(),
+    junk: !heavySource, wrap: true, hideErrors: true, seed: Date.now(),
     layers: lv.layers, junkSize: lv.junk, decoys: lv.decoys, junkMul: lv.junkMul, fakes: lv.fakes || 0, remote: false,
     packRounds: 2
   }, opts);
@@ -744,7 +755,7 @@ function luaObfuscateInner(source, options) {
 
   let result = pre + body;
 
-  const heavyLocals = localPressure(source) > 150;
+  const heavyLocals = heavySource;
   if (o.wrap && (Number(o.level) >= 5 || heavyLocals) && !o.remote && process.env.FULL_VM !== '0') {
     let vmCode = tryFullVM(source, rid);
     if (!vmCode) {
