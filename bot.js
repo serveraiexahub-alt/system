@@ -38,6 +38,7 @@ const VERIFY_CHANNEL = process.env.VERIFY_CHANNEL || '1566290265117958154';
 const VERIFY_LOG = process.env.VERIFY_LOG || '1566290267059920958';
 const VERIFIED_ROLE_ID = process.env.VERIFIED_ROLE_ID || '1565267740019920966';
 const WEB_VERIFY_CHANNEL = process.env.WEB_VERIFY_CHANNEL || '1568954728388501524';
+const REPORT_CHANNEL = process.env.REPORT_CHANNEL || '1570981674718593065';
 
 const WELCOME_GIF = process.env.WELCOME_GIF || 'https://cdn.discordapp.com/attachments/1458606026847817772/1565270076960276570/how-to-make-gif-for-discord-4.gif';
 const LEAVE_GIF = process.env.LEAVE_GIF || 'https://cdn.discordapp.com/attachments/1458606026847817772/1565271048147042385/walter-white.gif';
@@ -501,6 +502,46 @@ client.on('messageCreate', async function (message) {
       return message.reply({ content: '🔧 ให้แอดมิน **' + d.username + '** แล้ว (ไอคอนผู้สร้างเว็บ · ปกปิดไม่จำกัด · ทุกระดับ)' });
     }
 
+    if (cmd === 'รีบัญชี' || cmd === 'rereg' || cmd === 'รี') {
+      if (!isOwnerOrStaff(message.member)) {
+        return message.reply({ content: 'เฉพาะเจ้าของ/พนักงานเท่านั้น', flags: MessageFlags.Ephemeral }).catch(function () {});
+      }
+      const mentioned = message.mentions.users.first();
+      const arg = (content.replace(/^!+/, '').split(/\s+/)[1] || '').replace(/^@/, '').trim();
+      if (!mentioned && !arg) {
+        return message.reply({ content: 'วิธีใช้: `!รีบัญชี ชื่อในเว็บ` หรือ `!รีบัญชี @แท็ก`', flags: MessageFlags.Ephemeral }).catch(function () {});
+      }
+      let r, d;
+      try {
+        r = await fetch(WEB_URL + '/api/discord/rereg', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
+          body: JSON.stringify({
+            username: mentioned ? '' : arg,
+            discordId: mentioned ? mentioned.id : '',
+            staffId: message.author.id,
+            staffName: message.author.username
+          })
+        });
+        d = await r.json().catch(function () { return {}; });
+      } catch (e) {
+        return message.reply({ content: 'เชื่อมต่อเว็บไม่ได้: ' + e.message });
+      }
+      if (!r.ok) return message.reply({ content: '❌ ' + (d.error || r.status) }).catch(function () {});
+      const embed = new EmbedBuilder()
+        .setColor(GREEN)
+        .setTitle('♻️ รีบัญชีให้แล้ว')
+        .setDescription(
+          '**ผู้ใช้:** ' + (d.username ? '`' + d.username + '`' : 'ไม่ทราบชื่อในเว็บ') + ' (<@' + d.discordId + '>)\n' +
+          '**สถานะเดิม:** ' + (d.wasVerified ? 'เคยยืนยันบัญชีแล้ว' : 'ยังไม่เคยยืนยัน') + (d.hadAccount ? ' · มีบัญชีในเว็บ' : ' · ยังไม่มีบัญชี') + '\n' +
+          '**รหัสค้างที่ล้าง:** ' + (d.cleared || 0) + ' รายการ\n\n' +
+          '👉 สมัครใหม่ได้ **1 ครั้ง** — ให้เข้ากลุ่ม → กลับไปหน้าเว็บ → กดยืนยันรหัสอีกครั้ง'
+        )
+        .setFooter({ text: 'โดย ' + message.author.username })
+        .setTimestamp();
+      return message.reply({ embeds: [embed] }).catch(function () {});
+    }
+
     if (cmd === 'help') {
       return message.reply({
         embeds: [new EmbedBuilder()
@@ -511,6 +552,7 @@ client.on('messageCreate', async function (message) {
             '**`!อัปข้อมูล`** — นำเข้าไฟล์สำรอง (แนบหรือตอบกลับไฟล์ .json)\n' +
             
             '**`!แอดมิน ชื่อในเว็บ`** — ให้แอดมินเว็บ (เจ้าของ/พนักงาน)\n' +
+            '**`!รีบัญชี ชื่อในเว็บ`** หรือ **`!รีบัญชี @แท็ก`** — ให้คนนั้นสมัครใหม่ได้อีก 1 ครั้ง\n' +
             '**`!help`** — แสดงคำสั่งทั้งหมด'
           )
           .setFooter({ text: 'เฉพาะพนักงาน: เซฟ/อัปข้อมูล' })]
@@ -652,7 +694,22 @@ client.on('interactionCreate', async function (interaction) {
         return;
       }
       if (!res.ok) {
-        await interaction.editReply({ content: 'ยืนยันไม่สำเร็จ: ' + (data.error || 'unknown error') }).catch(function () {});
+        // รหัสผิด / หมดอายุ / บัญชีซ้ำ → ล้างรหัสค้างให้ก่อน แล้วบอกทางไปต่อ
+        let extra = '';
+        try {
+          const rr = await fetch(WEB_URL + '/api/discord/reset-code', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
+            body: JSON.stringify({ discordId: interaction.user.id })
+          });
+          const rd = await rr.json().catch(function () { return {}; });
+          if (res.status === 409 || rd.blocked) {
+            extra = '\n\n👉 บัญชี Discord นี้เคยยืนยันไปแล้ว — ให้แอดมินพิมพ์ `!รีบัญชี @แท็ก` เพื่อรีบัญชีให้ 1 ครั้ง';
+          } else {
+            extra = '\n\n♻️ ล้างรหัสค้างให้แล้ว — กลับไปที่เว็บ กด **ยืนยันรหัส** อีกครั้งเพื่อขอรหัสใหม่ (รหัสมีอายุ 15 นาที)';
+          }
+        } catch (e) {}
+        await interaction.editReply({ content: 'ยืนยันไม่สำเร็จ: ' + (data.error || 'unknown error') + extra }).catch(function () {});
         return;
       }
       const note = await grantRole(interaction);
@@ -1007,5 +1064,65 @@ async function checkExpiredPremium() {
 }
 
 setInterval(checkExpiredPremium, 5 * 60 * 1000);
+
+// ── ส่งต่อเรื่องแจ้งปัญหาจากเว็บ ─────────────────────────────────────────────
+// เว็บเก็บเรื่องลง db.reports แล้วที่นี่ดึงไปโพสต์ในช่อง REPORT_CHANNEL
+// ไฟล์แนบอ่านจากโฟลเดอร์ uploads/ บนเครื่องเดียวกัน
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+let reportBusy = false;
+
+async function relayReports() {
+  if (reportBusy) return;
+  reportBusy = true;
+  try {
+    const res = await fetch(WEB_URL + '/api/reports/pending', { headers: { 'x-bot-secret': BOT_SECRET } });
+    if (!res.ok) return;
+    const data = await res.json().catch(function () { return {}; });
+    const list = data.reports || [];
+    if (!list.length) return;
+    const channel = await client.channels.fetch(REPORT_CHANNEL).catch(function () { return null; });
+    if (!channel) { console.log('❌ ไม่พบช่องแจ้งปัญหา ' + REPORT_CHANNEL); return; }
+    for (const item of list) {
+      const files = [];
+      for (const f of (item.files || [])) {
+        const full = path.join(UPLOAD_DIR, String(f.path || ''));
+        if (f.path && fs.existsSync(full)) {
+          files.push(new AttachmentBuilder(full, { name: f.name || f.path }));
+        }
+      }
+      const who = (item.username ? '`' + item.username + '`' : 'ไม่ทราบชื่อ') + (item.discordId ? ' (<@' + item.discordId + '>)' : '');
+      const embed = new EmbedBuilder()
+        .setColor(0xe67e22)
+        .setTitle('🛠️ แจ้งปัญหาใหม่')
+        .setDescription('**จาก:** ' + who + '\n\n' + String(item.text || '').slice(0, 3500))
+        .setFooter({ text: 'ID ' + item.id })
+        .setTimestamp(new Date(Number(item.at) || Date.now()));
+      let msg = null;
+      try {
+        msg = await channel.send({ embeds: [embed], files: files.slice(0, 3) });
+      } catch (e) {
+        console.error('❌ ส่งเรื่องแจ้งปัญหาไม่สำเร็จ:', e.message);
+        continue;
+      }
+      await fetch(WEB_URL + '/api/reports/sent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-bot-secret': BOT_SECRET },
+        body: JSON.stringify({ id: item.id, messageId: msg && msg.id })
+      }).catch(function () {});
+      console.log('📨 ส่งเรื่องแจ้งปัญหา ' + item.id + ' เข้าช่องแล้ว');
+    }
+  } catch (e) {
+    // เว็บอาจปิดอยู่ตอนอัปเดต — ไม่ต้องสแปม log ทุก 5 วิ
+    const now = Date.now();
+    if (!relayReports.lastErr || now - relayReports.lastErr > 60000) {
+      relayReports.lastErr = now;
+      console.error('report relay failed:', e.message);
+    }
+  } finally {
+    reportBusy = false;
+  }
+}
+
+setInterval(relayReports, 5 * 1000);
 
 client.login(TOKEN);
