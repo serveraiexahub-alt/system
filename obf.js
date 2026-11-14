@@ -820,7 +820,10 @@ function luaObfuscateInner(source, options) {
       let packRounds = Math.max(1, Math.min(3, wantRounds));
       while (packRounds > 1 && packed.length * Math.pow(2.0, packRounds) > budgetVM) packRounds--;
       for (let li = 0; li < packRounds; li++) {
-        const p2 = packBlob(packed, rnd, o.hideErrors && li === 1, rid, prev, li === 1 ? 0 : undefined, { i: li, n: packRounds });
+        // the outermost layer must always report: it is the one that actually
+        // runs the payload, so an error there has to reach the player's screen
+        const outer = (li === packRounds - 1);
+        const p2 = packBlob(packed, rnd, o.hideErrors && (li === 1 || outer), rid, prev, li === 1 ? 0 : undefined, { i: li, n: packRounds });
         packed = p2.code;
         prev = p2.scheme;
         if (packed.length > budgetVM) break;
