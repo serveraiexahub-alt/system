@@ -240,18 +240,25 @@ const LAYER_PREFIX = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 let CURRENT_LAYER_PREFIX = '';
 let CURRENT_PG_BASE = 0;
 let CURRENT_LAYER_LABEL = '';
+let CURRENT_LEVEL = 5;
 
 // A failure must never be silent. "รันแล้วไม่มีอะไรเกิดขึ้น" is the report we get
 // when a decoder bails out with a bare `return`, so every abort path now prints
 // to the console and raises a red on-screen notice with the layer it died in.
+// Every message carries the build, the level and the layer, so a screenshot of
+// the in-game notice is enough to tell which build produced the file.
+function obfTag() {
+  const layer = CURRENT_LAYER_LABEL ? (' ' + CURRENT_LAYER_LABEL.replace(/:$/, '')) : '';
+  return '[obf] ' + OBF_BUILD + ' L' + CURRENT_LEVEL + layer + ': ';
+}
 function failLua(msg) {
-  const lit = JSON.stringify(String(msg));
+  const lit = JSON.stringify(obfTag() + String(msg));
   return 'if warn then pcall(warn,' + lit + ') end if __pgn then pcall(__pgn,' + lit + ') end ';
 }
 function layerTag() { return CURRENT_LAYER_LABEL ? (CURRENT_LAYER_LABEL + ' ') : ''; }
 
 
-const OBF_BUILD = 'v2.2';
+const OBF_BUILD = 'v2.3';
 
 // Progress overlay: a small "Lx NN%" label in the top-right of the screen while
 // the layers decode, the decode loops yield so the game does not freeze, and a
@@ -286,7 +293,7 @@ pcall(function()
         if _PG then pcall(function() _PG:Destroy() end) end
         _PG,_PL=nil,nil
         if stuck<99 then
-          local m="[obf] ค้างที่ "..tostring(stuck).."% — ถอดรหัสไม่จบ สคริปต์ไม่ทำงาน"
+          local m="[obf] @@TAG2@@ ค้างที่ "..tostring(stuck).."% — ถอดรหัสไม่จบ สคริปต์ไม่ทำงาน"
           if warn then pcall(warn,m) end
           if __pgn then pcall(__pgn,m) end
         end
@@ -341,7 +348,8 @@ function progressPrelude(info) {
   const N = Math.max(1, Number(info && info.layers) || 1);
   const tag = '[obf] build ' + OBF_BUILD + ' L' + L + '/' + N + ' ชั้น';
   return '-- สกัด HUB · build ' + OBF_BUILD + ' · L' + L + ' · ' + N + ' ชั้น\n' +
-    PRELUDE_BODY.split('@@LV@@').join(String(L)).split('@@TAG@@').join(tag);
+    PRELUDE_BODY.split('@@LV@@').join(String(L)).split('@@TAG@@').join(tag)
+      .split('@@TAG2@@').join(OBF_BUILD + ' L' + L);
 }
 
 
@@ -388,20 +396,63 @@ function localPressure(source) {
   catch (e) { return 0; }
   const stack = [0];
   let peak = 0;
+  function bump() {
+    let sum = 0;
+    for (let k = 0; k < stack.length; k++) sum += stack[k];
+    if (sum > peak) peak = sum;
+  }
+  function countParams(from) {
+    // parameters occupy registers exactly like locals do
+    let j = from;
+    while (j < toks.length && !(toks[j].t === 'op' && toks[j].v === '(')) {
+      if (toks[j].t === 'kw') return 0;
+      j++;
+    }
+    if (j >= toks.length) return 0;
+    let n = 0, expect = false;
+    for (let k = j + 1; k < toks.length; k++) {
+      const tk = toks[k];
+      if (tk.t === 'op' && tk.v === ')') break;
+      if (tk.t === 'op' && tk.v === ',') { expect = true; continue; }
+      if (tk.t === 'name' && expect) { n++; expect = false; }
+      else if (tk.t === 'name' && k === j + 1) { n++; }
+      else if (tk.t === 'op' && tk.v === ':') { /* type annotation: skip */ }
+    }
+    return n;
+  }
+  function countForVars(from) {
+    let n = 0, expect = true;
+    for (let k = from; k < toks.length; k++) {
+      const tk = toks[k];
+      if (tk.t === 'kw') break;
+      if (tk.t === 'op' && (tk.v === '=' || tk.v === 'in')) break;
+      if (tk.t === 'name' && expect) { n++; expect = false; }
+      else if (tk.t === 'op' && tk.v === ',') expect = true;
+    }
+    return n;
+  }
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
     if (t.t !== 'kw') continue;
-    if (t.v === 'function' || t.v === 'do' || t.v === 'then' || t.v === 'repeat') stack.push(0);
-    else if (t.v === 'elseif' || t.v === 'else') { stack.pop(); stack.push(0); }
+    if (t.v === 'function' || t.v === 'do' || t.v === 'then' || t.v === 'repeat') {
+      stack.push(0);
+      if (t.v === 'function') {
+        stack[stack.length - 1] += countParams(i + 1);
+        bump();
+      }
+    } else if (t.v === 'elseif' || t.v === 'else') { stack.pop(); stack.push(0); }
     else if (t.v === 'end' || t.v === 'until') { if (stack.length > 1) stack.pop(); }
-    else if (t.v === 'local') {
+    else if (t.v === 'for') {
+      // the loop variables of a numeric/generic for live in the body scope
+      const n = countForVars(i + 1);
+      if (n) stack[stack.length - 1] += n;
+      bump();
+    } else if (t.v === 'local') {
       let n = 1, j = i + 1;
       if (toks[j] && toks[j].t === 'kw' && toks[j].v === 'function') { /* one name */ }
       else { while (toks[j] && toks[j].t === 'name') { if (toks[j + 1] && toks[j + 1].t === 'op' && toks[j + 1].v === ',') { n++; j += 2; } else break; } }
       stack[stack.length - 1] += n;
-      let sum = 0;
-      for (let k = 0; k < stack.length; k++) sum += stack[k];
-      if (sum > peak) peak = sum;
+      bump();
     }
   }
   return peak;
@@ -417,10 +468,15 @@ function luaObfuscateInner(source, options) {
     .replace(/^\uFFFE/, '');
   const opts = options || {};
   // Inline junk inserts an extra local after every then/do/else/repeat. On a
-  // script that already sits at the 200 local-register ceiling that single extra
-  // local is what triggers "Out of local registers", so skip it there.
-  const heavySource = localPressure(source) > 150;
+  // script that already sits near the 200 local-register ceiling that single
+  // extra local is what triggers "Out of local registers", so skip it there.
+  // The estimate counts locals, parameters and for-loop variables, because
+  // Roblox counts all three against the 200 register limit and a function that
+  // looks harmless can still overflow through its parameters.
+  const pressure = localPressure(source);
+  const heavySource = pressure > 120;
   const lv = LEVELS[Math.max(1, Math.min(6, Number(opts.level) || 3))];
+  CURRENT_LEVEL = Math.max(1, Math.min(6, Number(opts.level) || 3));
   const o = Object.assign({
     strings: lv.strings, numbers: lv.numbers, rename: lv.rename,
     junk: !heavySource, wrap: true, hideErrors: true, seed: Date.now(),
@@ -464,6 +520,67 @@ function luaObfuscateInner(source, options) {
     const pidx = (ptk && typeof ptk.ridx === 'number') ? ptk.ridx : -1;
     if (pidx >= 0) ends[pidx] = true;
   }
+
+  // Luau gives a function 200 local registers. A packed payload is compiled as a
+  // single main chunk, where every top-level local stays alive until the end of
+  // the file, so a script with a few hundred top-level declarations dies with
+  // "Out of local registers when trying to allocate ...". When that is the case,
+  // the `local` keyword is dropped from those declarations: they become plain
+  // assignments (globals), which need no registers at all.
+  const COLLAPSE_SAFE = {
+    'self': 1, '_ENV': 1, '_G': 1, 'arg': 1, 'game': 1, 'script': 1, 'workspace': 1, 'type': 1,
+    'print': 1, 'warn': 1, 'error': 1, 'assert': 1, 'pcall': 1, 'xpcall': 1, 'select': 1,
+    'tostring': 1, 'tonumber': 1, 'next': 1, 'pairs': 1, 'ipairs': 1, 'setmetatable': 1,
+    'getmetatable': 1, 'rawget': 1, 'rawset': 1, 'unpack': 1, 'math': 1, 'string': 1,
+    'table': 1, 'os': 1, 'coroutine': 1, 'task': 1, 'wait': 1, 'spawn': 1, 'delay': 1,
+    'tick': 1, 'typeof': 1, 'Instance': 1, 'Enum': 1, 'Color3': 1, 'UDim2': 1, 'UDim': 1,
+    'Vector2': 1, 'Vector3': 1, 'CFrame': 1, 'NumberRange': 1, 'BrickColor': 1, 'TweenInfo': 1,
+    'Ray': 1, 'Rect': 1, 'Font': 1, 'loadstring': 1, 'getgenv': 1, 'getfenv': 1
+  };
+  const collapseAt = [];
+  {
+    let depth = 0, elseifPending = 0;
+    for (let i = 0; i < real.length; i++) {
+      const tk = real[i];
+      if (tk.t !== 'kw') continue;
+      if (tk.v === 'elseif') { elseifPending++; continue; }
+      if (tk.v === 'then') { if (elseifPending > 0) elseifPending--; else depth++; continue; }
+      if (tk.v === 'do' || tk.v === 'repeat' || tk.v === 'function') { depth++; continue; }
+      if (tk.v === 'end' || tk.v === 'until') { depth = Math.max(0, depth - 1); continue; }
+      if (tk.v !== 'local' || depth !== 0) continue;
+      const isFunc = !!(real[i + 1] && real[i + 1].t === 'kw' && real[i + 1].v === 'function');
+      const names = [];
+      if (isFunc) {
+        if (real[i + 2] && real[i + 2].t === 'name') names.push(real[i + 2].v);
+      } else {
+        let k = i + 1;
+        while (real[k] && real[k].t === 'name') {
+          names.push(real[k].v);
+          if (real[k + 1] && real[k + 1].t === 'op' && real[k + 1].v === ',') k += 2; else break;
+        }
+      }
+      if (!names.length) continue;
+      if (names.some(function (n) { return COLLAPSE_SAFE[n]; })) continue;
+      // only a declaration that assigns immediately can drop `local`: a bare
+      // `local a` would become the statement `a`, which is not valid Lua
+      let hasVal = isFunc;
+      if (!hasVal) {
+        let k = i + 1;
+        while (real[k] && real[k].t === 'name') {
+          if (real[k + 1] && real[k + 1].t === 'op' && real[k + 1].v === ',') k += 2; else { k++; break; }
+        }
+        hasVal = !!(real[k] && real[k].t === 'op' && real[k].v === '=');
+      }
+      if (hasVal) collapseAt.push(i);
+    }
+  }
+  // if the VM is going to be attempted there is a chance we end up packing the
+  // raw source anyway, so collapse in that case too (it costs nothing when the VM
+  // wins, because the packed body is never emitted then)
+  const willTryVM = !!(o.wrap && (Number(o.level) >= 5 || heavySource) && process.env.FULL_VM !== '0');
+  const collapseSet = (collapseAt.length > 90 || willTryVM) ? new Set(collapseAt) : null;
+  if (collapseSet) o.junk = false;
+  o._collapsed = collapseSet ? collapseAt.length : 0;
 
   const usedNames = new Set();
   for (let i = 0; i < real.length; i++) if (real[i].t === 'name') usedNames.add(real[i].v);
@@ -719,6 +836,7 @@ function luaObfuscateInner(source, options) {
   const outTok = [];
   for (let i = 0; i < real.length; i++) {
     const tk = real[i];
+    if (collapseSet && collapseSet.has(i)) { outTok.push(''); continue; }
     if (tk.t === 'name' && renameMap[i]) { outTok.push(renameMap[i]); continue; }
     if (tk.t === 'str') {
       if (o.strings) { outTok.push(emitString(tk.v)); }
@@ -737,9 +855,11 @@ function luaObfuscateInner(source, options) {
   }
 
   let body = '';
+  let lastTok = '';
   for (let i = 0; i < outTok.length; i++) {
-    if (i > 0) {
-      const prev = outTok[i - 1];
+    if (outTok[i] === '') continue;
+    if (lastTok !== '') {
+      const prev = lastTok;
       const cur = outTok[i];
       const prevWord = /[A-Za-z0-9_]$/.test(prev);
       const curWord = /^[A-Za-z0-9_]/.test(cur);
@@ -763,6 +883,7 @@ function luaObfuscateInner(source, options) {
       body += needSpace ? ' ' : (rnd() < 0.06 ? ' ' : '');
     }
     body += outTok[i];
+    lastTok = outTok[i];
     if (o.junk && rnd() < 0.08 && /^(then|do|else|repeat)$/.test(outTok[i])) {
       body += ' do local ' + makeName() + '=(' + (Math.floor(rnd() * 1000) + 1) + '-' + (Math.floor(rnd() * 500)) + ') end';
     }
@@ -800,7 +921,10 @@ function luaObfuscateInner(source, options) {
   let result = pre + body;
 
   const heavyLocals = heavySource;
-  if (o.wrap && (Number(o.level) >= 5 || heavyLocals) && !o.remote && process.env.FULL_VM !== '0') {
+  if (o.wrap && (Number(o.level) >= 5 || heavyLocals) && process.env.FULL_VM === '0') {
+    o.vmFallback = 'VM ปิดอยู่ที่เซิร์ฟเวอร์ (FULL_VM=0)';
+  }
+  if (o.wrap && (Number(o.level) >= 5 || heavyLocals) && process.env.FULL_VM !== '0') {
     let vmCode = tryFullVM(source, rid);
     if (!vmCode) {
       const why = (function () {
@@ -839,7 +963,7 @@ function luaObfuscateInner(source, options) {
       return {
         code: progressPrelude({ level: Number(o.level) || 5, layers: packRounds }) + out,
         vault: null,
-        stats: { strings: 0, original: source.length, output: out.length, decoys: 0, junk: Math.max(0, out.length - packed.length), fullVm: true, warn: out.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' }
+        stats: { strings: 0, original: source.length, output: out.length, decoys: 0, junk: Math.max(0, out.length - packed.length), fullVm: true, collapsed: 0, pressure: pressure, warn: out.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' }
       };
     }
   }
@@ -899,7 +1023,7 @@ function luaObfuscateInner(source, options) {
     var junkChars = built.code.length;
   }
 
-  return { code: progressPrelude({ level: Number(o.level) || 5, layers: layerCount }) + result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0), fullVm: false, vmFallback: o.vmFallback || '', warn: result.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' } };
+  return { code: progressPrelude({ level: Number(o.level) || 5, layers: layerCount }) + result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0), fullVm: false, collapsed: o._collapsed || 0, pressure: pressure, vmFallback: o.vmFallback || '', warn: result.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' } };
 }
 
 
@@ -1124,13 +1248,13 @@ function wrapTail(parts, rnd, hideErrors, LD, S, FN, ER, OK, RES) {
     parts.push('local ' + FN + ',' + ER + '=' + LD + '(' + S + ',"@")');
     parts.push('if not ' + FN + ' then ' + FN + ',' + ER + '=' + LD + '(' + S + ') end');
     parts.push('if not ' + FN + ' then local _E2=(getgenv and getgenv()) or (getfenv and getfenv()) local _L2=_E2 and _E2[string.char(108,111,97,100,115,116,114,105,110,103)] if _L2 and _L2~=' + LD + ' then ' + FN + ',' + ER + '=_L2(' + S + ',"@") end end');
-    parts.push('if not ' + FN + ' then local _m="[obf] payload failed to compile: "..tostring(' + ER + ') if warn then warn(_m) end if __pgn then __pgn(_m) end return end');
+    parts.push('if not ' + FN + ' then local _m=' + JSON.stringify(obfTag() + 'payload failed to compile: ') + '..tostring(' + ER + ') if warn then warn(_m) end if __pgn then __pgn(_m) end return end');
     // detect a stale "already running" flag so the run is not silently skipped
     parts.push('if print then pcall(print,"[obf] running") end');
     parts.push('local _E3=(getgenv and getgenv()) or (getfenv and getfenv())');
     parts.push('local _pre=_E3 and _E3.SCRIPT_HUB_RUNNING');
     parts.push('local ' + OK + ',' + RES + '=pcall(' + FN + ')');
-    parts.push('if not ' + OK + ' then local _m="[obf] runtime error: "..tostring(' + RES + ') if warn then warn(_m) end if __pgn then __pgn(_m) end return end');
+    parts.push('if not ' + OK + ' then local _m=' + JSON.stringify(obfTag() + 'runtime error: ') + '..tostring(' + RES + ') if warn then warn(_m) end if __pgn then __pgn(_m) end return end');
     parts.push('if print then pcall(print,"[obf] finished") end');
     parts.push('if _pre then if warn then warn("[obf] already running") end if __pgn then __pgn("[obf] สคริปต์นี้ทำงานค้างอยู่แล้ว — ออกจากเกมแล้วเข้าใหม่ก่อนรัน") end end');
     parts.push('return ' + RES);

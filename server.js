@@ -30,6 +30,16 @@ const { makeCaptcha } = require('./captcha.js');
 
 const CHANGELOG = [
   {
+    v: 'v2.3', date: '14 พ.ย. 2026',
+    items: [
+      'แก้บัค "Out of local registers ... exceeded limit 200": นับตัวแปรท้องถิ่นครบขึ้น (รวมพารามิเตอร์และตัวแปร for) และกันสคริปต์หนักไปใช้ VM ทุกระดับ',
+      'สคริปต์ที่แพ็คแบบไม่ใช้ VM จะยุบตัวแปรระดับบนสุดเป็นตาราง เพื่อไม่ให้เกิน 200 เรจิสเตอร์',
+      'เปิด "เก็บตัวแปรไว้บนเว็บ" แล้วยังได้ VM ที่ระดับ Max (เดิมตกไปใช้การแพ็คธรรมดา)',
+      'กล่องแดง/warn ทุกอันบอก build + ระดับ + ชั้นที่พัง เช่น [obf] v2.3 L5 ชั้น 1/2: ...',
+      'ถ้าใช้ VM ไม่ได้ ระบบจะเตือนชัดเจนพร้อมสาเหตุ'
+    ]
+  },
+  {
     v: 'v2.2', date: '14 พ.ย. 2026',
     items: [
       'ระดับกลับมาตามแพ็กเกจ: ฟรี L1-L3 · พรีเมียมถึง L4 · Max ถึง L5 (L5 = bytecode VM)',
@@ -1185,7 +1195,11 @@ app.post('/api/obfuscate', auth, function (req, res) {
   if (finalCode.length > obfLim) {
     return res.status(413).json({ error: 'ผลลัพธ์เกิน ' + Math.floor(obfLim / 1048576) + ' MB — ลดระดับความยากลง', left: after.left });
   }
-  const result = { ok: true, code: finalCode, stats: out.stats, level: level, remote: remote, left: after.left, limit: after.limit, premium: prem, vmFallback: (out.stats && out.stats.vmFallback) || '' };
+  const stats = out.stats || {};
+  if (!stats.fullVm && Number(stats.pressure || 0) > 120) {
+    stats.warn = 'สคริปต์นี้หนักมากและไฟล์นี้ไม่ได้ใช้ VM — มีโอกาสรันไม่ขึ้น แนะนำ L5 (Max)';
+  }
+  const result = { ok: true, code: finalCode, stats: stats, level: level, remote: remote, left: after.left, limit: after.limit, premium: prem, vmFallback: stats.vmFallback || '' };
   if (body.save === true) {
     if (!fileName) return res.status(400).json({ error: 'File name is required to save' });
     if (fileName.length > MAX_NAME) return res.status(400).json({ error: 'File name too long' });
@@ -3213,7 +3227,7 @@ textarea.input { min-height: 240px; resize: vertical; font-size: 12px; line-heig
       } }).then(function (d) {
         last = d.code;
         outEl.textContent = d.code;
-        statEl.textContent = t('obf_stats') + ': ' + d.stats.original + ' -> ' + d.stats.output + ' B · L' + (d.level || 3) + (d.remote ? ' · remote' : '') + ' · ' + (d.stats.decoys || 0) + ' decoy';
+        statEl.textContent = t('obf_stats') + ': ' + d.stats.original + ' -> ' + d.stats.output + ' B · L' + (d.level || 3) + (d.stats.fullVm ? ' · VM' : ' · pack') + (d.remote ? ' · remote' : '') + ' · ' + (d.stats.decoys || 0) + ' decoy';
         if (d.vmFallback) toast(t('obf_vm_fail') + ' (' + d.vmFallback + ')', true);
         if (d.stats && d.stats.warn) toast(d.stats.warn, true);
         toast(t('obf_done'));
