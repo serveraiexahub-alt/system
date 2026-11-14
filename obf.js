@@ -239,12 +239,26 @@ const CH_HELPER = 'local CH={} for _i=0,255 do CH[_i]=string.char(_i) end ';
 const LAYER_PREFIX = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 let CURRENT_LAYER_PREFIX = '';
 let CURRENT_PG_BASE = 0;
+let CURRENT_LAYER_LABEL = '';
+
+// A failure must never be silent. "รันแล้วไม่มีอะไรเกิดขึ้น" is the report we get
+// when a decoder bails out with a bare `return`, so every abort path now prints
+// to the console and raises a red on-screen notice with the layer it died in.
+function failLua(msg) {
+  const lit = JSON.stringify(String(msg));
+  return 'if warn then pcall(warn,' + lit + ') end if __pgn then pcall(__pgn,' + lit + ') end ';
+}
+function layerTag() { return CURRENT_LAYER_LABEL ? (CURRENT_LAYER_LABEL + ' ') : ''; }
 
 
-// Progress overlay: a small "NN%" label in the top-right of the screen while the
-// layers decode, and the decode loop yields so the game does not freeze.
-const PROGRESS_PRELUDE = `
-local _PG,_PL,_PGV
+const OBF_BUILD = 'v2.2';
+
+// Progress overlay: a small "Lx NN%" label in the top-right of the screen while
+// the layers decode, the decode loops yield so the game does not freeze, and a
+// 30 second watchdog turns a silent freeze into a visible notice. Everything is
+// pcall'd because an executor may refuse CoreGui — the payload must still run.
+const PRELUDE_BODY = `
+local _PG,_PL,_PGV,_PGD=false
 pcall(function()
   local host=game:GetService("CoreGui")
   local sg=Instance.new("ScreenGui")
@@ -253,31 +267,47 @@ pcall(function()
   sg.ResetOnSpawn=false
   sg.DisplayOrder=2147483647
   local lb=Instance.new("TextLabel")
-  lb.Size=UDim2.new(0,96,0,22)
-  lb.Position=UDim2.new(1,-104,0,8)
+  lb.Size=UDim2.new(0,104,0,22)
+  lb.Position=UDim2.new(1,-112,0,8)
   lb.BackgroundColor3=Color3.fromRGB(18,18,18)
   lb.BackgroundTransparency=0.25
   lb.TextColor3=Color3.fromRGB(255,255,255)
   lb.Font=Enum.Font.GothamBold
   lb.TextSize=13
-  lb.Text="0%"
+  lb.Text="L@@LV@@ 0%"
   lb.Parent=sg
   sg.Parent=host
   _PG,_PL=sg,lb
-  if task and task.delay then task.delay(25,function() pcall(function() if sg then sg:Destroy() end end) end) end
+  if task and task.delay then
+    task.delay(30,function()
+      pcall(function()
+        if _PGD then return end
+        local stuck=_PGV or 0
+        if _PG then pcall(function() _PG:Destroy() end) end
+        _PG,_PL=nil,nil
+        if stuck<99 then
+          local m="[obf] ค้างที่ "..tostring(stuck).."% — ถอดรหัสไม่จบ สคริปต์ไม่ทำงาน"
+          if warn then pcall(warn,m) end
+          if __pgn then pcall(__pgn,m) end
+        end
+      end)
+    end)
+  end
 end)
 pcall(function()
   __pg=function(p)
-    if not _PL then return end
+    if _PGD or not _PL then return end
     if p>100 then p=100 end
+    if p<0 then p=0 end
     if not _PGV or p>_PGV then _PGV=p end
-    pcall(function() _PL.Text=tostring(_PGV).."%" end)
+    pcall(function() _PL.Text="L@@LV@@ "..tostring(_PGV).."%" end)
   end
   __pgy=function()
     local t=task
     if t and t.wait then pcall(t.wait,0) elseif wait then pcall(wait,0) end
   end
   __pgd=function()
+    _PGD=true
     if _PG then pcall(function() _PG:Destroy() end) _PG=nil _PL=nil end
   end
   __pgn=function(m)
@@ -299,11 +329,20 @@ pcall(function()
       lbN.Text=m
       lbN.Parent=sgN
       sgN.Parent=hostN
-      if task and task.delay then task.delay(9,function() pcall(function() sgN:Destroy() end) end) end
+      if task and task.delay then task.delay(12,function() pcall(function() sgN:Destroy() end) end) end
     end)
   end
 end)
+if print then pcall(print,"@@TAG@@") end
 `;
+
+function progressPrelude(info) {
+  const L = Math.max(1, Math.min(6, Number(info && info.level) || 5));
+  const N = Math.max(1, Number(info && info.layers) || 1);
+  const tag = '[obf] build ' + OBF_BUILD + ' L' + L + '/' + N + ' ชั้น';
+  return '-- สกัด HUB · build ' + OBF_BUILD + ' · L' + L + ' · ' + N + ' ชั้น\n' +
+    PRELUDE_BODY.split('@@LV@@').join(String(L)).split('@@TAG@@').join(tag);
+}
 
 
 
@@ -795,13 +834,14 @@ function luaObfuscateInner(source, options) {
         if (built.code) out = built.code + ' return (function() ' + out + ' end)()';
       }
       return {
-        code: PROGRESS_PRELUDE + out,
+        code: progressPrelude({ level: Number(o.level) || 5, layers: packRounds }) + out,
         vault: null,
         stats: { strings: 0, original: source.length, output: out.length, decoys: 0, junk: Math.max(0, out.length - packed.length), fullVm: true, warn: out.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' }
       };
     }
   }
 
+  let layerCount = 1;
   if (o.wrap) {
     let layers = Math.max(1, Math.min(8, Number(o.layers) || 1));
     const srcBytes = String(source).length;
@@ -817,6 +857,7 @@ function luaObfuscateInner(source, options) {
       if (packed.code.length > budget && li > 0) break;
       result = packed.code;
       prev = packed.scheme;
+      layerCount = li + 1;
     }
   }
 
@@ -855,7 +896,7 @@ function luaObfuscateInner(source, options) {
     var junkChars = built.code.length;
   }
 
-  return { code: PROGRESS_PRELUDE + result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0), fullVm: false, vmFallback: o.vmFallback || '', warn: result.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' } };
+  return { code: progressPrelude({ level: Number(o.level) || 5, layers: layerCount }) + result, vault: vault, stats: { strings: pool.length, original: source.length, output: result.length, decoys: (typeof decoyCount === 'number' ? decoyCount : 0), junk: (typeof junkChars === 'number' ? junkChars : 0), fullVm: false, vmFallback: o.vmFallback || '', warn: result.length > 1500000 ? 'ไฟล์ใหญ่มาก อาจโหลดช้าใน executor' : '' } };
 }
 
 
@@ -1066,8 +1107,8 @@ function emitLoader(nm) {
     'local _e2=getfenv and getfenv() ' +
     LD + '=(_e1 and _e1[' + LD + ']) or (_e2 and _e2[' + LD + ']) or ' +
     '(_G and _G[' + LD + ']) or loadstring or load ' +
-    'if not ' + LD + ' then if warn then warn(' +
-      '"[obf] this executor has no loadstring") end return end ';
+    'if not ' + LD + ' then ' +
+      failLua('[obf] executor นี้ไม่มี loadstring — รันสคริปต์ไม่ได้ (แจ้งแอดมิน)') + 'return end ';
 }
 
 function wrapTail(parts, rnd, hideErrors, LD, S, FN, ER, OK, RES) {
@@ -1162,7 +1203,7 @@ function schemeA(src, rnd, hideErrors, rid) {
   p.push('local ' + nm.N + '={} for ' + nm.I + '=1,' + nm.LEN + '[' + nm.C + '] do ' + nm.N + '[' + nm.I + ']=CH[' + nm.Q + '[' + nm.I + ']] end');
   p.push(nm.OUT + '[' + nm.ORD + '[' + nm.C + ']]=table.concat(' + nm.N + ') end');
   p.push('local ' + nm.S + '=table.concat(' + nm.OUT + ')');
-  p.push('if #' + nm.S + '~=' + numLit(ch.n, rnd) + ' then return end');
+  p.push('if #' + nm.S + '~=' + numLit(ch.n, rnd) + ' then ' + failLua('[obf] ถอดรหัสขนาดไม่ตรง — ไฟล์อาจถูกตัดระหว่างโหลด') + 'return end');
   const hcA = hashCheckLines(nm, src);
   p.push(hcA[0]); p.push(hcA[1]);
   p.push(emitLoader(nm));
@@ -1203,7 +1244,7 @@ function schemeB(src, rnd, hideErrors, rid) {
   p.push('if __pg then __pg(' + (CURRENT_PG_BASE + 1) + '+math.floor(_k*15/24)) end if __pgy then __pgy() end');
   p.push('end');
   p.push('local ' + nm.S + '=table.concat(' + nm.Q + ')');
-  p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' then return end');
+  p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' then ' + failLua('[obf] ถอดรหัสขนาดไม่ตรง — ไฟล์อาจถูกตัดระหว่างโหลด') + 'return end');
   const hcB = hashCheckLines(nm, src);
   p.push(hcB[0]); p.push(hcB[1]);
   p.push(emitLoader(nm));
@@ -1237,7 +1278,7 @@ function schemeC(src, rnd, hideErrors, rid) {
   p.push('if __pg then __pg(' + (CURRENT_PG_BASE + 1) + '+math.floor(_k*15/24)) end if __pgy then __pgy() end');
   p.push('end');
   p.push('local ' + nm.S + '=table.concat(' + nm.Q + ')');
-  p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' and #' + nm.S + '~=' + numLit(n + 1, rnd) + ' then return end');
+  p.push('if #' + nm.S + '~=' + numLit(n, rnd) + ' and #' + nm.S + '~=' + numLit(n + 1, rnd) + ' then ' + failLua('[obf] ถอดรหัสขนาดไม่ตรง — ไฟล์อาจถูกตัดระหว่างโหลด') + 'return end');
   const hcC = hashCheckLines(nm, src);
   p.push(hcC[0]); p.push(hcC[1]);
   p.push(emitLoader(nm));
@@ -1278,7 +1319,7 @@ function schemeD(src, rnd, hideErrors, rid) {
   }
 
   const ids = [];
-  while (ids.length < blocks.length + 3) {
+  while (ids.length < blocks.length + 4) {
     const v = 2 + Math.floor(rnd() * 90000);
     if (ids.indexOf(v) < 0) ids.push(v);
   }
@@ -1286,6 +1327,7 @@ function schemeD(src, rnd, hideErrors, rid) {
   const blockIds = ids.slice(1, 1 + blocks.length);
   const endId = ids[1 + blocks.length];
   const decoyId = ids[2 + blocks.length];
+  const failId = ids[3 + blocks.length];
 
   const p = [];
   p.push(CH_HELPER + 'if __pg then __pg(' + CURRENT_PG_BASE + ') end ' + 'local ' + nm.BL + '={' + blocks.map(function (b) { return '{' + b.data.join(',') + '}'; }).join(',') + '}');
@@ -1314,6 +1356,7 @@ function schemeD(src, rnd, hideErrors, rid) {
     L.push(nm.Q + '[' + nm.I + ']=CH[((' + nm.HX + '%16)*16+math.floor(' + nm.HX + '/16))]');
     L.push('end');
     L.push(nm.OUT + '[' + (bi + 1) + ']=table.concat(' + nm.Q + ')');
+    L.push('if __pg then __pg(' + (CURRENT_PG_BASE + 1) + '+math.floor(' + bi + '/' + blocks.length + '*15)) end if __pgy then __pgy() end');
     L.push(nm.T + '=' + opaque);
     branch.push('elseif ' + nm.T + '==' + blockIds[bi] + ' then ' + L.join(' '));
   });
@@ -1322,10 +1365,12 @@ function schemeD(src, rnd, hideErrors, rid) {
   const hashLua = emitHash('hh', nm.S);
   branch.push('elseif ' + nm.T + '==' + endId + ' then ' +
     'for ' + nm.I + '=1,' + blocks.length + ' do ' + nm.S + '=' + nm.S + '..(' + nm.OUT + '[' + nm.I + '] or "") end ' +
-    hashLua + 'if hh~=' + luaHash(src) + ' then ' + nm.T + '=0 elseif #' + nm.S + '~=' + numLit(n, rnd) + ' then ' + nm.T + '=0 else ' +
+    hashLua + 'if hh~=' + luaHash(src) + ' then ' + nm.T + '=' + failId + ' elseif #' + nm.S + '~=' + numLit(n, rnd) + ' then ' + nm.T + '=' + failId + ' else ' +
     emitLoader(nm) +
-    'local ' + nm.RES + '=' + nm.LD + '(' + nm.S + ') if not ' + nm.RES + ' then ' + nm.T + '=0 else ' +
+    'local ' + nm.RES + '=' + nm.LD + '(' + nm.S + ') if not ' + nm.RES + ' then ' + nm.T + '=' + failId + ' else ' +
     'return ' + nm.RES + '() end end');
+  branch.push('elseif ' + nm.T + '==' + failId + ' then ' +
+    failLua('[obf] ถอดรหัสชั้นนี้ไม่ผ่าน (checksum/ขนาดไม่ตรง) — หยุด ไม่รันโค้ดที่เพี้ยน') + nm.T + '=0');
 
   branch.push('elseif ' + nm.T + '==' + decoyId + ' then local ' + nm.V + '=0 for ' + nm.I + '=1,3 do ' + nm.V + '=' + nm.V + '+' + nm.I + ' end ' + nm.T + '=0');
   branch.push('else ' + nm.T + '=0 end end');
@@ -1492,7 +1537,10 @@ function schemeE(src, rnd, hideErrors, rid) {
   p.push('local ' + nm.OUT + '={}');
   p.push('local ' + nm.P + '=1');
   p.push('local ' + nm.C + '=' + mkey);
+  p.push('if __pg then __pg(' + CURRENT_PG_BASE + ') end');
+  p.push('local _q=0');
   p.push('while true do');
+  p.push('_q=_q+1 if _q%2000==0 then if __pg then __pg(' + (CURRENT_PG_BASE + 1) + '+math.min(15,math.floor(_q/' + Math.max(1, prog.length) + '*15))) end if __pgy then __pgy() end end');
   p.push('local ' + nm.V + '=' + nm.BL + '[' + nm.P + ']');
   p.push(nm.P + '=' + nm.P + '+1');
   p.push('local ' + nm.I + '=(math.floor(' + nm.V + '/1000000)-' + nm.C + ')%31');
@@ -1522,6 +1570,7 @@ function schemeE(src, rnd, hideErrors, rid) {
   p.push('elseif ' + nm.I + '==' + op('SLICE') + ' then ' + nm.OUT + '[' + nm.HX + ']=string.sub(' + nm.OUT + '[' + nm.T + '],1,' + nm.OUT + '[' + nm.G + '])');
   p.push('else break end');
   p.push('end');
+  p.push(failLua('[obf] ถอดรหัสชั้นนี้ไม่ผ่าน (ขนาดข้อมูลไม่ตรง) — หยุด ไม่รันโค้ดที่เพี้ยน'));
   p.push('return nil');
   return p.join(' ');
 }
@@ -1533,6 +1582,7 @@ function packBlob(src, rnd, hideErrors, rid, avoid, forceIdx, layerInfo) {
   const PG_BASE = Math.floor((LI.i / Math.max(1, LI.n)) * 92);
   CURRENT_PG_BASE = PG_BASE;
   CURRENT_LAYER_PREFIX = LAYER_PREFIX[(LI.i || 0) % LAYER_PREFIX.length];
+  CURRENT_LAYER_LABEL = LI.n > 1 ? ('ชั้น ' + (LI.i + 1) + '/' + LI.n + ':') : '';
   // Schemes 3 and 4 decode through a multi-block pass and an opcode interpreter.
   // They are the strongest but also the slowest by an order of magnitude, so for
   // a big payload they would add seconds of load time for little extra cover.
@@ -1594,7 +1644,9 @@ function hashCheckLines(nm, src) {
   const expect = luaHash(src);
   return [
     emitHash(nm.Q + '_h', nm.S),
-    'if ' + nm.Q + '_h~=' + expect + ' then return end'
+    'if ' + nm.Q + '_h~=' + expect + ' then ' +
+      failLua('[obf] checksum ไม่ตรง — ถอดรหัสได้ข้อมูลเพี้ยน (ไฟล์ถูกตัด/แก้ หรือโค้ดมีตัวอักษรพิเศษ)') +
+      'return end'
   ];
 }
 
